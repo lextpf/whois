@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: edffab1bcd2cb5b8c17d6ba34d5651ea0bf82979
+
+      - name: Configure CMake
+        run: cmake --preset vs2022-windows
+
+      - name: Build tests
+        run: cmake --build build --config Release --target whois_test_utils whois_test_settings -- /m
+
+      - name: Run tests
+        run: ctest --test-dir build --build-config Release --output-on-failure

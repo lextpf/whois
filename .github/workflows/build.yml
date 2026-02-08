@@ -1,0 +1,34 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: edffab1bcd2cb5b8c17d6ba34d5651ea0bf82979
+
+      - name: Configure CMake
+        run: cmake --preset vs2022-windows
+
+      - name: Build
+        run: cmake --build build --config Release -- /m
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whois
+          path: build/Release/whois.dll
