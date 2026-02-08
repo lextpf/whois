@@ -102,17 +102,4 @@ namespace Occlusion
         return !HasLineOfSightToActor(actor);
     }
 
-    bool IsActorOccluded(RE::Actor* actor, RE::Actor* player)
-    {
-        if (!actor)
-        {
-            return false;
-        }
-
-        RE::NiPoint3 pos = actor->GetPosition();
-        pos.z += actor->GetHeight() * Constants::kHeadHeightMultiplier;
-
-        return IsActorOccluded(actor, player, pos);
-    }
-
 }

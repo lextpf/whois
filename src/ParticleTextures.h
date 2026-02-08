@@ -60,12 +60,6 @@ namespace ParticleTextures
     bool Initialize(ID3D11Device* device);
 
     /**
-     * Release all loaded particle textures.
-     * Call before D3D11 device is released.
-     */
-    void Shutdown();
-
-    /**
      * Check if particle textures have been loaded.
      * @return true if textures are available for use
      */
@@ -79,13 +73,6 @@ namespace ParticleTextures
     int GetTextureCount(int style);
 
     /**
-     * Get the first texture ID for a particle type.
-     * @param style Particle style to get texture for
-     * @return ImTextureID (D3D11 SRV) or empty if not loaded
-     */
-    ImTextureID GetTexture(int style);
-
-    /**
      * Get a texture based on particle index.
      * Uses particle index to select consistently (no flickering).
      * @param style Particle style
@@ -93,29 +80,6 @@ namespace ParticleTextures
      * @return ImTextureID or empty if not loaded
      */
     ImTextureID GetRandomTexture(int style, int particleIndex);
-
-    /**
-     * Get the size of a loaded texture.
-     * @param style Particle style
-     * @param outWidth Output width in pixels
-     * @param outHeight Output height in pixels
-     * @return true if texture exists and size was retrieved
-     */
-    bool GetTextureSize(int style, int& outWidth, int& outHeight);
-
-    /**
-     * Draw a textured particle sprite.
-     * Uses the first texture for the style.
-     *
-     * @param list ImGui draw list
-     * @param center Center position of the sprite
-     * @param size Size of the sprite (width and height)
-     * @param style Particle style (determines which texture folder)
-     * @param color Tint color (white = no tint)
-     * @param rotation Rotation angle in radians
-     */
-    void DrawSprite(ImDrawList* list, const ImVec2& center, float size,
-                    int style, ImU32 color, float rotation = 0.0f);
 
     /**
      * Draw a textured particle sprite with specific particle index.

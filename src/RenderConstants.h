@@ -50,12 +50,6 @@ namespace RenderConstants
     constexpr uint32_t kCacheGraceFrames = 60;  ///< Frames to keep cache entries after actor leaves view (~1s at 60fps)
     constexpr int kPositionHistorySize = 8;     ///< Position history buffer size for moving average smoothing
 
-    // Smoothing Parameters
-    constexpr float kSmoothingEpsilon = 0.01f;        ///< $\epsilon$ for exponential smoothing: $\alpha = 1 - \epsilon^{\Delta t / T}$
-    constexpr float kMinSettleTime = 1e-5f;           ///< Minimum $T_{settle}$ to prevent division by zero
-    constexpr float kLargeMovementThreshold = 50.0f;  ///< Threshold $\|p_{new} - p_{old}\| > 50\text{px}$ for large movements
-    constexpr float kLargeMovementBlend = 0.5f;       ///< Blend factor $\beta = 0.5$ for large movements: $p = p_{old} + \beta(p_{new} - p_{old})$
-
     // Debug Overlay
     constexpr float kReloadNotificationDuration = 2.0f;  ///< Duration to show "Reloaded!" notification (seconds)
     constexpr int kFrameTimeSamples = 60;                ///< Number of frame time samples for averaging

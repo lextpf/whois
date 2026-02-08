@@ -22,7 +22,6 @@ namespace AppearanceTemplate
     // Stubs for overlay interface functions
     void QueryNiOverrideInterface() {}
     void RetryNiOverrideInterface() {}
-    bool HasOverlayInterface() { return false; }
     void TestOverlayOnPlayer()
     {
         SKSE::log::info("Overlay system not implemented");

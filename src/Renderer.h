@@ -157,11 +157,4 @@ namespace Renderer
      * @return The new enabled state (true = enabled, false = disabled).
      */
     bool ToggleEnabled();
-
-    /**
-     * Check if rendering is enabled.
-     *
-     * @return true if rendering is enabled, false if disabled.
-     */
-    bool IsEnabled();
 }

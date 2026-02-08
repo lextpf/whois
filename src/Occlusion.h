@@ -126,18 +126,6 @@ namespace Occlusion
     bool IsActorOccluded(RE::Actor* actor, RE::Actor* player, const RE::NiPoint3& actorWorldPos);
 
     /**
-     * Check if an actor is occluded using head position.
-     *
-     * Convenience overload that calculates world position from actor's head.
-     *
-     * @param actor The actor to check.
-     * @param player The player actor.
-     *
-     * @return `true` if the actor is occluded.
-     */
-    bool IsActorOccluded(RE::Actor* actor, RE::Actor* player);
-
-    /**
      * Get camera position and forward direction.
      *
      * @param[out] outPos Camera world position.

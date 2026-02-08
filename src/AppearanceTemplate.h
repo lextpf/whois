@@ -185,13 +185,6 @@ namespace AppearanceTemplate
     void RetryNiOverrideInterface();
 
     /**
-     * @brief Check if manual overlay system is available.
-     *
-     * @return false (not implemented)
-     */
-    bool HasOverlayInterface();
-
-    /**
      * @brief Test manual overlay extraction on player.
      *
      * Scans player's 3D nodes for overlay geometry and logs results.

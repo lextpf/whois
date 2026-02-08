@@ -356,10 +356,6 @@ namespace Renderer
         return newState;
     }
 
-    bool IsEnabled() {
-        return s_manualEnabled.load(std::memory_order_acquire);
-    }
-
     // Get player character
     static RE::Actor *GetPlayer()
     {

@@ -8,7 +8,6 @@
 #include <array>
 #include <vector>
 #include <cmath>
-#include <random>
 #include <filesystem>
 
 #pragma comment(lib, "windowscodecs.lib")
@@ -36,9 +35,6 @@ namespace ParticleTextures
     static ID3D11SamplerState* g_pointSampler = nullptr;
     static ID3D11Device* g_device = nullptr;
     static ID3D11DeviceContext* g_context = nullptr;
-
-    // Random number generator for texture selection
-    static std::mt19937 g_rng{ std::random_device{}() };
 
     /**
      * Load a PNG file using WIC and create a D3D11 texture.
@@ -254,29 +250,6 @@ namespace ParticleTextures
         return g_initialized;
     }
 
-    void Shutdown()
-    {
-        for (auto& texVec : g_textures) {
-            for (auto& info : texVec) {
-                if (info.srv) {
-                    info.srv->Release();
-                    info.srv = nullptr;
-                }
-            }
-            texVec.clear();
-        }
-        if (g_pointSampler) {
-            g_pointSampler->Release();
-            g_pointSampler = nullptr;
-        }
-        if (g_context) {
-            g_context->Release();
-            g_context = nullptr;
-        }
-        g_device = nullptr;
-        g_initialized = false;
-    }
-
     // Callback to set point sampler before drawing pixel art
     static void SetPointSamplerCallback(const ImDrawList*, const ImDrawCmd*)
     {
@@ -294,13 +267,6 @@ namespace ParticleTextures
     {
         if (style < 0 || style >= NUM_TYPES) return 0;
         return static_cast<int>(g_textures[style].size());
-    }
-
-    ImTextureID GetTexture(int style)
-    {
-        if (style < 0 || style >= NUM_TYPES) return ImTextureID{};
-        if (g_textures[style].empty()) return ImTextureID{};
-        return reinterpret_cast<ImTextureID>(g_textures[style][0].srv);
     }
 
     // Simple hash for better texture distribution while remaining stable
@@ -330,22 +296,6 @@ namespace ParticleTextures
         size_t texIndex = HashIndex(style, particleIndex) % texCount;
 
         return reinterpret_cast<ImTextureID>(g_textures[style][texIndex].srv);
-    }
-
-    bool GetTextureSize(int style, int& outWidth, int& outHeight)
-    {
-        if (style < 0 || style >= NUM_TYPES) return false;
-        if (g_textures[style].empty()) return false;
-        outWidth = g_textures[style][0].width;
-        outHeight = g_textures[style][0].height;
-        return true;
-    }
-
-    void DrawSprite(ImDrawList* list, const ImVec2& center, float size,
-                    int style, ImU32 color, float rotation)
-    {
-        // Use index 0 for backwards compatibility
-        DrawSpriteWithIndex(list, center, size, style, 0, color, rotation);
     }
 
     void DrawSpriteWithIndex(ImDrawList* list, const ImVec2& center, float size,
