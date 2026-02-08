@@ -1,0 +1,23 @@
+{
+  "name": "whois",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "imgui",
+      "features": [
+        "dx11-binding",
+        "win32-binding",
+        "freetype",
+        "wchar32"
+      ]
+    },
+    "spdlog",
+    "rapidcsv",
+    "minhook",
+    "boost-unordered",
+    "srell",
+    "xbyak",
+    "gtest"
+  ],
+  "builtin-baseline": "edffab1bcd2cb5b8c17d6ba34d5651ea0bf82979"
+}

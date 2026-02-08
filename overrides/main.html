@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;700&display=swap');
+
+    /* Default 200% zoom */
+    body { zoom: 2; }
+    .mermaid, .mermaid *
+    {
+      font-family: 'Caveat', cursive !important;
+    }
+
+    /* Fix spurious scrollbar on both sidebars */
+    .md-sidebar--primary .md-sidebar__scrollwrap,
+    .md-sidebar--secondary .md-sidebar__scrollwrap
+    {
+      overflow: hidden !important;
+    }
+
+    /* !!! function blue */
+    .md-typeset .admonition.function,
+    .md-typeset details.function
+    {
+      border-color: #3b82f6;
+    }
+    .md-typeset .function > .admonition-title,
+    .md-typeset .function > summary
+    {
+      background-color: rgba(59, 130, 246, 0.1);
+      border-color: #3b82f6;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 0.82em;
+    }
+    .md-typeset .function > .admonition-title::before,
+    .md-typeset .function > summary::before
+    {
+      background-color: #3b82f6;
+      -webkit-mask-image: var(--md-admonition-icon--example);
+              mask-image: var(--md-admonition-icon--example);
+    }
+
+    /* !!! variable purple */
+    .md-typeset .admonition.variable,
+    .md-typeset details.variable
+    {
+      border-color: #8b5cf6;
+    }
+    .md-typeset .variable > .admonition-title,
+    .md-typeset .variable > summary
+    {
+      background-color: rgba(139, 92, 246, 0.1);
+      border-color: #8b5cf6;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 0.82em;
+    }
+    .md-typeset .variable > .admonition-title::before,
+    .md-typeset .variable > summary::before
+    {
+      background-color: #8b5cf6;
+      -webkit-mask-image: var(--md-admonition-icon--info);
+              mask-image: var(--md-admonition-icon--info);
+    }
+
+    /* !!! macro amber */
+    .md-typeset .admonition.macro,
+    .md-typeset details.macro
+    {
+      border-color: #f59e0b;
+    }
+    .md-typeset .macro > .admonition-title,
+    .md-typeset .macro > summary
+    {
+      background-color: rgba(245, 158, 11, 0.1);
+      border-color: #f59e0b;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 0.82em;
+    }
+    .md-typeset .macro > .admonition-title::before,
+    .md-typeset .macro > summary::before
+    {
+      background-color: #f59e0b;
+      -webkit-mask-image: var(--md-admonition-icon--quote);
+              mask-image: var(--md-admonition-icon--quote);
+    }
+
+    /* !!! typedef teal */
+    .md-typeset .admonition.typedef,
+    .md-typeset details.typedef
+    {
+      border-color: #14b8a6;
+    }
+    .md-typeset .typedef > .admonition-title,
+    .md-typeset .typedef > summary
+    {
+      background-color: rgba(20, 184, 166, 0.1);
+      border-color: #14b8a6;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 0.82em;
+    }
+    .md-typeset .typedef > .admonition-title::before,
+    .md-typeset .typedef > summary::before
+    {
+      background-color: #14b8a6;
+      -webkit-mask-image: var(--md-admonition-icon--abstract);
+              mask-image: var(--md-admonition-icon--abstract);
+    }
+  </style>
+  <script>
+    window.MathJax =
+    {
+      tex:
+      {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        processEscapes: true,
+        processEnvironments: true
+      },
+      options:
+      {
+        ignoreHtmlClass: 'tex2jax_ignore',
+        processHtmlClass: 'tex2jax_process'
+      },
+      output:
+      {
+        font: 'mathjax-fira'
+      },
+      chtml:
+      {
+        displayAlign: 'left',
+        displayIndent: '2em'
+      },
+      svg:
+      {
+        displayAlign: 'left',
+        displayIndent: '2em'
+      }
+    };
+  </script>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    import elkLayouts from
+      "https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.0/dist/mermaid-layout-elk.esm.min.mjs";
+    mermaid.registerLayoutLoaders(elkLayouts);
+
+    // Remove @author entries from documentation
+    function removeAuthorEntries()
+    {
+      // Doxide renders @author as plain <p> text
+      document.querySelectorAll('p').forEach(p =>
+      {
+        if (p.textContent.trim().startsWith('@author'))
+        {
+          p.remove();
+        }
+      });
+      // In <tr> with "Author" heading
+      document.querySelectorAll('tr').forEach(tr =>
+      {
+        if (tr.textContent.includes('Author') && tr.querySelector('td'))
+        {
+          tr.remove();
+        }
+      });
+      document.querySelectorAll('dt').forEach(dt =>
+      {
+        if (dt.textContent.trim() === 'Author')
+        {
+          const dd = dt.nextElementSibling;
+          if (dd && dd.tagName === 'DD') dd.remove();
+          dt.remove();
+        }
+      });
+    }
+    removeAuthorEntries();
+
+    mermaid.initialize(
+    {
+      startOnLoad: false,
+      theme: 'dark',
+      look: 'handDrawn',
+      fontFamily: 'Caveat, cursive',
+      flowchart:
+      {
+        useMaxWidth: true,
+        curve: 'curve',
+        nodeSpacing: 70,
+        rankSpacing: 90
+      },
+      sequence: { useMaxWidth: true },
+      themeVariables:
+      {
+        mainBkg: '#0b0f14',
+        lineColor: '#94a3b8',
+        clusterBkg: '#0f172a',
+        clusterBorder: '#334155',
+        fontSize: '14px',
+        // Node colors
+        primaryColor: '#3b82f6',
+        primaryTextColor: '#f8fafc',
+        primaryBorderColor: '#60a5fa',
+        secondaryColor: '#8b5cf6',
+        secondaryTextColor: '#f8fafc',
+        secondaryBorderColor: '#a78bfa',
+        tertiaryColor: '#10b981',
+        tertiaryTextColor: '#f8fafc',
+        tertiaryBorderColor: '#34d399',
+        // State diagram
+        labelBackgroundColor: '#1e293b',
+        noteBkgColor: '#1e3a5f',
+        noteTextColor: '#e2e8f0',
+        noteBorderColor: '#3b82f6'
+      }
+    });
+
+    function fixMermaidBlocks()
+    {
+      const pres = document.querySelectorAll('pre.mermaid');
+      const nodes = [];
+      pres.forEach(pre =>
+      {
+        let src = pre.textContent.trim();
+        if (!src) return;
+        const div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = src;
+        pre.replaceWith(div);
+        nodes.push(div);
+      });
+      return nodes;
+    }
+
+    const nodes = fixMermaidBlocks();
+    if (nodes.length)
+    {
+      await mermaid.run({ nodes });
+    }
+
+    // Inject Material Design Icons into sidebar nav labels
+    // Uses base64-encoded SVGs with CSS mask-image for currentColor inheritance
+    const navIcons =
+    {
+      'Core':          'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTIxLDE2LjVDMjEsMTYuODggMjAuNzksMTcuMjEgMjAuNDcsMTcuMzhMMTIuNTcsMjEuODJDMTIuNDEsMjEuOTQgMTIuMjEsMjIgMTIsMjJDMTEuNzksMjIgMTEuNTksMjEuOTQgMTEuNDMsMjEuODJMMy41MywxNy4zOEMzLjIxLDE3LjIxIDMsMTYuODggMywxNi41VjcuNUMzLDcuMTIgMy4yMSw2Ljc5IDMuNTMsNi42MkwxMS40MywyLjE4QzExLjU5LDIuMDYgMTEuNzksMiAxMiwyQzEyLjIxLDIgMTIuNDEsMi4wNiAxMi41NywyLjE4TDIwLjQ3LDYuNjJDMjAuNzksNi43OSAyMSw3LjEyIDIxLDcuNVYxNi41TTEyLDQuMTVMNi4wNCw3LjVMMTIsMTAuODVMMTcuOTYsNy41TDEyLDQuMTVNNSwxNS45MUwxMSwxOS4yOVYxMi41OEw1LDkuMjFWMTUuOTFNMTksMTUuOTFWOS4yMUwxMywxMi41OFYxOS4yOUwxOSwxNS45MVoiIGZpbGw9ImN1cnJlbnRDb2xvciIvPjwvc3ZnPg==',
+      'Rendering':     'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTE3LjUsMTJBMS41LDEuNSAwIDAsMSAxNiwxMC41QTEuNSwxLjUgMCAwLDEgMTcuNSw5QTEuNSwxLjUgMCAwLDEgMTksMTAuNUExLjUsMS41IDAgMCwxIDE3LjUsMTJNMTQuNSw4QTEuNSwxLjUgMCAwLDEgMTMsNi41QTEuNSwxLjUgMCAwLDEgMTQuNSw1QTEuNSwxLjUgMCAwLDEgMTYsNi41QTEuNSwxLjUgMCAwLDEgMTQuNSw4TTkuNSw4QTEuNSwxLjUgMCAwLDEgOCw2LjVBMS41LDEuNSAwIDAsMSA5LjUsNUExLjUsMS41IDAgMCwxIDExLDYuNUExLjUsMS41IDAgMCwxIDkuNSw4TTYuNSwxMkExLjUsMS41IDAgMCwxIDUsMTAuNUExLjUsMS41IDAgMCwxIDYuNSw5QTEuNSwxLjUgMCAwLDEgOCwxMC41QTEuNSwxLjUgMCAwLDEgNi41LDEyTTEyLDNBOSw5IDAgMCwwIDMsMTJBOSw5IDAgMCwwIDEyLDIxQTEuNSwxLjUgMCAwLDAgMTMuNSwxOS41QzEzLjUsMTkuMTEgMTMuMzUsMTguNzYgMTMuMTEsMTguNUMxMi44OCwxOC4yMyAxMi43MywxNy44OCAxMi43MywxNy41QTEuNSwxLjUgMCAwLDEgMTQuMjMsMTZIMTZBNSw1IDAgMCwwIDIxLDExQzIxLDYuNTggMTYuOTcsMyAxMiwzWiIgZmlsbD0iY3VycmVudENvbG9yIi8+PC9zdmc+',
+      'Configuration': 'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyLDE1LjVBMy41LDMuNSAwIDAsMSA4LjUsMTJBMy41LDMuNSAwIDAsMSAxMiw4LjVBMy41LDMuNSAwIDAsMSAxNS41LDEyQTMuNSwzLjUgMCAwLDEgMTIsMTUuNU0xOS40MywxMi45N0MxOS40NywxMi42NSAxOS41LDEyLjMzIDE5LjUsMTJDMTkuNSwxMS42NyAxOS40NywxMS4zNCAxOS40MywxMUwyMS41NCw5LjM3QzIxLjczLDkuMjIgMjEuNzgsOC45NSAyMS42Niw4LjczTDE5LjY2LDUuMjdDMTkuNTQsNS4wNSAxOS4yNyw0Ljk2IDE5LjA1LDUuMDVMMTYuNTYsNi4wNUMxNi4wNCw1LjY2IDE1LjUsNS4zMiAxNC44Nyw1LjA3TDE0LjUsMi40MkMxNC40NiwyLjE4IDE0LjI1LDIgMTQsMkgxMEM5Ljc1LDIgOS41NCwyLjE4IDkuNSwyLjQyTDkuMTMsNS4wN0M4LjUsNS4zMiA3Ljk2LDUuNjYgNy40NCw2LjA1TDQuOTUsNS4wNUM0LjczLDQuOTYgNC40Niw1LjA1IDQuMzQsNS4yN0wyLjM0LDguNzNDMi4yMSw4Ljk1IDIuMjcsOS4yMiAyLjQ2LDkuMzdMNC41NywxMUM0LjUzLDExLjM0IDQuNSwxMS42NyA0LjUsMTJDNC41LDEyLjMzIDQuNTMsMTIuNjUgNC41NywxMi45N0wyLjQ2LDE0LjYzQzIuMjcsMTQuNzggMi4yMSwxNS4wNSAyLjM0LDE1LjI3TDQuMzQsMTguNzNDNC40NiwxOC45NSA0LjczLDE5LjA0IDQuOTUsMTguOTVMNy40NCwxNy45NEM3Ljk2LDE4LjM0IDguNSwxOC42OCA5LjEzLDE4LjkzTDkuNSwyMS41OEM5LjU0LDIxLjgyIDkuNzUsMjIgMTAsMjJIMTRDMTQuMjUsMjIgMTQuNDYsMjEuODIgMTQuNSwyMS41OEwxNC44NywxOC45M0MxNS41LDE4LjY3IDE2LjA0LDE4LjM0IDE2LjU2LDE3Ljk0TDE5LjA1LDE4Ljk1QzE5LjI3LDE5LjA0IDE5LjU0LDE4Ljk1IDE5LjY2LDE4LjczTDIxLjY2LDE1LjI3QzIxLjc4LDE1LjA1IDIxLjczLDE0Ljc4IDIxLjU0LDE0LjYzTDE5LjQzLDEyLjk3WiIgZmlsbD0iY3VycmVudENvbG9yIi8+PC9zdmc+',
+      'Hooks':         'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHRpdGxlPmhvb2s8L3RpdGxlPjxwYXRoIGQ9Ik0xOCw2QzE4LDcuODIgMTYuNzYsOS40MSAxNSw5Ljg2VjE3QTUsNSAwIDAsMSAxMCwyMkE1LDUgMCAwLDEgNSwxN1YxMkwxMCwxN0g3QTMsMyAwIDAsMCAxMCwyMEEzLDMgMCAwLDAgMTMsMTdWOS44NkMxMS4yMyw5LjQgMTAsNy44IDEwLDUuOTdDMTAsMy43NiAxMS44LDIgMTQsMkMxNi4yMiwyIDE4LDMuNzkgMTgsNk0xNCw4QTIsMiAwIDAsMCAxNiw2QTIsMiAwIDAsMCAxNCw0QTIsMiAwIDAsMCAxMiw2QTIsMiAwIDAsMCAxNCw4WiIgLz48L3N2Zz4=',
+      'Utilities':     'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHRpdGxlPnRvb2xib3g8L3RpdGxlPjxwYXRoIGQ9Ik0xOCAxNkgxNlYxNUg4VjE2SDZWMTVIMlYyMEgyMlYxNUgxOFYxNk0yMCA4SDE3VjZDMTcgNC45IDE2LjEgNCAxNSA0SDlDNy45IDQgNyA0LjkgNyA2VjhINEMyLjkgOCAyIDguOSAyIDEwVjE0SDZWMTJIOFYxNEgxNlYxMkgxOFYxNEgyMlYxMEMyMiA4LjkgMjEuMSA4IDIwIDhNMTUgOEg5VjZIMTVWOFoiIC8+PC9zdmc+'
+    };
+
+    function injectNavIcons()
+    {
+      document.querySelectorAll('.md-nav__link').forEach(link =>
+      {
+        const span = link.querySelector('.md-ellipsis') || link;
+        const text = span.textContent.trim();
+        const b64 = navIcons[text];
+        if (!b64) return;
+
+        const icon = document.createElement('span');
+        const uri = 'url(data:image/svg+xml;base64,' + b64 + ')';
+        icon.style.cssText = 'display:inline-block;width:1.1em;height:1.1em;vertical-align:-0.15em;margin-right:0.3em;flex-shrink:0;background-color:currentColor;-webkit-mask-image:' + uri + ';mask-image:' + uri + ';-webkit-mask-size:contain;mask-size:contain;';
+        span.prepend(icon);
+      });
+    }
+    injectNavIcons();
+  </script>
+{% endblock %}

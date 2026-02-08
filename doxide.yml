@@ -1,0 +1,32 @@
+# Doxide Configuration for whois
+# https://doxide.org
+
+title: whois
+description: SKSE overlay for actor info and appearance templates
+
+output: docs
+
+files:
+  - "src/*.h"
+  - "src/*.cpp"
+
+groups:
+  - name: Core
+    title: ":material-cube: Core Systems"
+    description: Plugin entry points and initialization.
+
+  - name: Rendering
+    title: ":material-palette: Rendering"
+    description: Nameplate rendering, text effects, and visual systems.
+
+  - name: Configuration
+    title: ":material-cog: Configuration"
+    description: Settings management and INI parsing.
+
+  - name: Hooks
+    title: ":material-hook: Engine Hooks"
+    description: SKSE hooks and game engine integration.
+
+  - name: Utilities
+    title: ":material-toolbox: Utilities"
+    description: Helper functions, containers, and common utilities.
