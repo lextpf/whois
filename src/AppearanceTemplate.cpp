@@ -3,25 +3,35 @@
 
 #include <SKSE/SKSE.h>
 
+#include <memory>
 #include <sstream>
 #include <iomanip>
 #include <vector>
 
 namespace AppearanceTemplate
 {
-    static bool s_applied = false;
-    static std::string s_templatePlugin;
-    static RE::FormID s_templateFormID = 0;
+    namespace {
+        struct TemplateState {
+            bool applied = false;
+            std::string plugin;
+            RE::FormID formID = 0;
+        };
+    }
+
+    static TemplateState& GetState() {
+        static TemplateState state;
+        return state;
+    }
 
     void ResetAppliedFlag()
     {
-        s_applied = false;
+        GetState().applied = false;
         SKSE::log::info("AppearanceTemplate: Applied flag reset");
     }
 
     // Stubs for overlay interface functions
-    void QueryNiOverrideInterface() {}
-    void RetryNiOverrideInterface() {}
+    void QueryNiOverrideInterface() { /* NiOverride not used; kept for API compatibility */ }
+    void RetryNiOverrideInterface() { /* NiOverride not used; kept for API compatibility */ }
     void TestOverlayOnPlayer()
     {
         SKSE::log::info("Overlay system not implemented");
@@ -460,7 +470,7 @@ namespace AppearanceTemplate
 
         if (templateNPC->headRelatedData) {
             if (!playerBase->headRelatedData) {
-                playerBase->headRelatedData = new RE::TESNPC::HeadRelatedData();
+                playerBase->headRelatedData = std::make_unique<RE::TESNPC::HeadRelatedData>().release();
             }
 
             // Hair color
@@ -636,7 +646,7 @@ namespace AppearanceTemplate
     bool ApplyIfConfigured()
     {
         // Only apply once per session
-        if (s_applied) {
+        if (GetState().applied) {
             SKSE::log::debug("AppearanceTemplate: Already applied this session");
             return true;
         }
@@ -664,8 +674,8 @@ namespace AppearanceTemplate
         }
 
         // Store template info for FaceGen paths
-        s_templatePlugin = Settings::TemplatePlugin;
-        s_templateFormID = resolvedID;
+        GetState().plugin = Settings::TemplatePlugin;
+        GetState().formID = resolvedID;
 
         // Look up the NPC
         auto form = RE::TESForm::LookupByID(resolvedID);
@@ -770,7 +780,7 @@ namespace AppearanceTemplate
         // Update the player's 3D
         UpdatePlayerAppearance();
 
-        s_applied = true;
+        GetState().applied = true;
         SKSE::log::info("AppearanceTemplate: Successfully applied template appearance");
 
         return true;

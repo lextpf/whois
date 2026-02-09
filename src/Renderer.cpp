@@ -315,7 +315,10 @@ namespace Renderer
     /// Current frame counter for cache management
     static uint32_t s_frame = 0;
     /// Per-frame overlap Y offsets, keyed by form ID
-    static std::unordered_map<uint32_t, float> s_overlapOffsets;
+    static std::unordered_map<uint32_t, float>& OverlapOffsets() {
+        static std::unordered_map<uint32_t, float> offsets;
+        return offsets;
+    }
 
     /// Snapshot of actor data for rendering (thread-safe)
     static std::vector<ActorDrawData> s_snapshot;
@@ -589,10 +592,11 @@ namespace Renderer
         for (auto &h : pl->highActorHandles)
         {
             // Stop if we've hit our limits
-            if (added >= kMaxActors || scanned++ >= kMaxScan)
+            if (added >= kMaxActors || scanned >= kMaxScan)
             {
                 break;
             }
+            ++scanned;
 
             // Resolve the actor handle to a pointer
             auto aSP = h.get();
@@ -932,17 +936,17 @@ namespace Renderer
         float lodTitleFactor = 1.0f;
         float lodEffectsFactor = 1.0f;
 
-        if (Settings::EnableLOD) {
-            float transRange = std::max(1.0f, Settings::LODTransitionRange);
+        if (Settings::Visual().EnableLOD) {
+            float transRange = std::max(1.0f, Settings::Visual().LODTransitionRange);
 
             // Title hidden beyond LODFarDistance
             float titleFadeT = TextEffects::Saturate(
-                (dist - Settings::LODFarDistance) / transRange);
+                (dist - Settings::Visual().LODFarDistance) / transRange);
             lodTitleFactor = 1.0f - TextEffects::SmoothStep(titleFadeT);
 
             // Effects (particles, ornaments) hidden beyond LODMidDistance
             float effectsFadeT = TextEffects::Saturate(
-                (dist - Settings::LODMidDistance) / transRange);
+                (dist - Settings::Visual().LODMidDistance) / transRange);
             lodEffectsFactor = 1.0f - TextEffects::SmoothStep(effectsFadeT);
         }
 
@@ -978,8 +982,8 @@ namespace Renderer
         }
 
         // Enforce minimum readable text size
-        if (Settings::MinimumPixelHeight > 0.0f) {
-            float minScale = Settings::MinimumPixelHeight / Settings::NameFontSize;
+        if (Settings::Visual().MinimumPixelHeight > 0.0f) {
+            float minScale = Settings::Visual().MinimumPixelHeight / Settings::NameFontSize;
             textScaleTarget = std::max(textScaleTarget, minScale);
         }
 
@@ -1046,7 +1050,7 @@ namespace Renderer
             expSmoothed.y = entry.smooth.y + (targetPos.y - entry.smooth.y) * pLerp;
 
             // PositionSmoothingBlend: 1.0 = pure moving-avg, 0.0 = pure exponential
-            float blend = Settings::PositionSmoothingBlend;
+            float blend = Settings::Visual().PositionSmoothingBlend;
             ImVec2 smoothedPos;
             smoothedPos.x = expSmoothed.x + (maSmoothed.x - expSmoothed.x) * blend;
             smoothedPos.y = expSmoothed.y + (maSmoothed.y - expSmoothed.y) * blend;
@@ -1056,10 +1060,10 @@ namespace Renderer
             float dy = targetPos.y - entry.smooth.y;
             float moveDist = std::sqrt(dx * dx + dy * dy);
 
-            if (moveDist > Settings::LargeMovementThreshold)
+            if (moveDist > Settings::Visual().LargeMovementThreshold)
             {
-                entry.smooth.x += (smoothedPos.x - entry.smooth.x) * Settings::LargeMovementBlend;
-                entry.smooth.y += (smoothedPos.y - entry.smooth.y) * Settings::LargeMovementBlend;
+                entry.smooth.x += (smoothedPos.x - entry.smooth.x) * Settings::Visual().LargeMovementBlend;
+                entry.smooth.y += (smoothedPos.y - entry.smooth.y) * Settings::Visual().LargeMovementBlend;
             }
             else
             {
@@ -1135,9 +1139,9 @@ namespace Renderer
         const Settings::TierDefinition &tier = Settings::Tiers[tierIdx];
 
         // Tier effect gating: restrict heavy effects to high-tier actors
-        bool tierAllowsGlow = !Settings::EnableTierEffectGating || tierIdx >= Settings::GlowMinTier;
-        bool tierAllowsParticles = !Settings::EnableTierEffectGating || tierIdx >= Settings::ParticleMinTier;
-        bool tierAllowsOrnaments = !Settings::EnableTierEffectGating || tierIdx >= Settings::OrnamentMinTier;
+        bool tierAllowsGlow = !Settings::Visual().EnableTierEffectGating || tierIdx >= Settings::Visual().GlowMinTier;
+        bool tierAllowsParticles = !Settings::Visual().EnableTierEffectGating || tierIdx >= Settings::Visual().ParticleMinTier;
+        bool tierAllowsOrnaments = !Settings::Visual().EnableTierEffectGating || tierIdx >= Settings::Visual().OrnamentMinTier;
 
         // Check for special title match
         // Special titles override normal tier styling for MMORPG-style nameplates
@@ -1266,8 +1270,8 @@ namespace Renderer
 
         // Reduced alpha for secondary text elements (title, level, separator)
         // This makes the name stand out more as the primary element
-        const float titleAlpha = alpha * Settings::TitleAlphaMultiplier;
-        const float levelAlpha = alpha * Settings::LevelAlphaMultiplier;
+        const float titleAlpha = alpha * Settings::Visual().TitleAlphaMultiplier;
+        const float levelAlpha = alpha * Settings::Visual().LevelAlphaMultiplier;
 
         // Title colors
         ImU32 colLTitle = ImGui::ColorConvertFloat4ToU32(ImVec4(LcTitle.x, LcTitle.y, LcTitle.z, titleAlpha));
@@ -1291,12 +1295,12 @@ namespace Renderer
         // Uses the configured NameFontSize as reference so outline looks correct at default zoom
         auto calcOutlineWidth = [=, &d](float fontSize) {
             float w = baseOutlineWidth * (fontSize / Settings::NameFontSize);
-            if (Settings::EnableDistanceOutlineScale) {
+            if (Settings::Visual().EnableDistanceOutlineScale) {
                 float distT = TextEffects::Saturate(
                     (d.distToPlayer - Settings::FadeStartDistance) /
                     (Settings::FadeEndDistance - Settings::FadeStartDistance));
-                float distMul = Settings::OutlineDistanceMin +
-                                (Settings::OutlineDistanceMax - Settings::OutlineDistanceMin) * distT;
+                float distMul = Settings::Visual().OutlineDistanceMin +
+                                (Settings::Visual().OutlineDistanceMax - Settings::Visual().OutlineDistanceMin) * distT;
                 w *= distMul;
             }
             return w;
@@ -1571,10 +1575,10 @@ namespace Renderer
         ImVec2 startPos = entry.smooth;
 
         // Apply overlap prevention offset
-        if (Settings::EnableOverlapPrevention)
+        if (Settings::Visual().EnableOverlapPrevention)
         {
-            auto oIt = s_overlapOffsets.find(d.formID);
-            if (oIt != s_overlapOffsets.end())
+            auto oIt = OverlapOffsets().find(d.formID);
+            if (oIt != OverlapOffsets().end())
                 startPos.y += oIt->second;
         }
 
@@ -1697,94 +1701,75 @@ namespace Renderer
         bool showOrnaments = ((d.isPlayer && Settings::EnableOrnaments && hasOrnaments && tierAllowsOrnaments)
                           || (specialTitle && specialTitle->forceOrnaments && hasOrnaments))
                           && lodEffectsFactor > 0.01f;
-        if (showOrnaments && !Settings::OrnamentFontPath.empty())
+        auto& ornIo = ImGui::GetIO();
+        ImFont* ornamentFont = (ornIo.Fonts->Fonts.Size >= 4) ? ornIo.Fonts->Fonts[3] : nullptr;
+        if (showOrnaments && !Settings::OrnamentFontPath.empty() && ornamentFont)
         {
-            // Get ornament font
-            auto& io = ImGui::GetIO();
-            if (io.Fonts->Fonts.Size >= 4)
+            // Calculate ornament scale based on tier position
+            float ornamentScale = 0.75f;
+            if (Settings::Tiers.size() > 1) {
+                ornamentScale = 0.75f + 0.5f * (static_cast<float>(tierIdx) / static_cast<float>(Settings::Tiers.size() - 1));
+            }
+            float sizeMultiplier = (specialTitle != nullptr) ? ornamentScale * 1.3f : ornamentScale;
+            float ornamentSize = Settings::OrnamentFontSize * Settings::OrnamentScale * sizeMultiplier;
+
+            // Extra padding between ornaments and text
+            float extraPadding = ornamentSize * 0.15f;
+            float totalSpacing = Settings::OrnamentSpacing + extraPadding;
+
+            // Use same colors as name for ornaments
+            ImU32 ornColL = ImGui::ColorConvertFloat4ToU32(ImVec4(Lc.x, Lc.y, Lc.z, alpha));
+            ImU32 ornColR = ImGui::ColorConvertFloat4ToU32(ImVec4(Rc.x, Rc.y, Rc.z, alpha));
+            ImU32 ornHighlight = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(tier.highlightColor[0], tier.highlightColor[1], tier.highlightColor[2], alpha));
+            ImU32 ornOutline = IM_COL32(0, 0, 0, (int)(alpha * 255.0f));
+
+            // Calculate outline width scaled for ornament size
+            float ornOutlineWidth = outlineWidth * (ornamentSize / nameFontSize);
+
+            // Glow color for ornaments
+            ImU32 glowColor = ImGui::ColorConvertFloat4ToU32(ImVec4(Lc.x, Lc.y, Lc.z, alpha));
+            bool showOrnGlow = Settings::EnableGlow && Settings::GlowIntensity > 0.0f && tierAllowsGlow;
+
+            // Draw a single ornament character with optional glow and text effect
+            auto drawOrnChar = [&](ImVec2 charPos, const char* ch) {
+                if (showOrnGlow) {
+                    TextEffects::AddTextGlow(drawList, ornamentFont, ornamentSize, charPos,
+                                             ch, glowColor, Settings::GlowRadius,
+                                             Settings::GlowIntensity, Settings::GlowSamples);
+                }
+                ApplyTextEffect(drawList, ornamentFont, ornamentSize, charPos, ch,
+                                tier.nameEffect, ornColL, ornColR, ornHighlight, ornOutline, ornOutlineWidth,
+                                phase01, strength, textSizeScale, alpha);
+            };
+
+            // Use UTF-8 aware iteration for multi-byte characters
+            if (!leftOrns.empty())
             {
-                ImFont* ornamentFont = io.Fonts->Fonts[3];
-                if (ornamentFont)
+                auto leftChars = Utf8ToChars(leftOrns);
+                float cursorX = nameplateCenter.x - nameplateWidth * 0.5f - totalSpacing;
+                // Draw characters in reverse order
+                for (int i = static_cast<int>(leftChars.size()) - 1; i >= 0; --i)
                 {
-                    // Calculate ornament scale based on tier position
-                    float ornamentScale = 0.75f;
-                    if (Settings::Tiers.size() > 1) {
-                        ornamentScale = 0.75f + 0.5f * (static_cast<float>(tierIdx) / static_cast<float>(Settings::Tiers.size() - 1));
-                    }
-                    float sizeMultiplier = (specialTitle != nullptr) ? ornamentScale * 1.3f : ornamentScale;
-                    float ornamentSize = Settings::OrnamentFontSize * Settings::OrnamentScale * sizeMultiplier;
+                    const std::string& ch = leftChars[i];
+                    ImVec2 charSize = ornamentFont->CalcTextSizeA(ornamentSize, FLT_MAX, 0.0f, ch.c_str());
+                    cursorX -= charSize.x;
+                    ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
+                    drawOrnChar(charPos, ch.c_str());
+                }
+            }
 
-                    // Extra padding between ornaments and text
-                    float extraPadding = ornamentSize * 0.15f;
-                    float totalSpacing = Settings::OrnamentSpacing + extraPadding;
-
-                    // Use same colors as name for ornaments
-                    ImU32 ornColL = ImGui::ColorConvertFloat4ToU32(ImVec4(Lc.x, Lc.y, Lc.z, alpha));
-                    ImU32 ornColR = ImGui::ColorConvertFloat4ToU32(ImVec4(Rc.x, Rc.y, Rc.z, alpha));
-                    ImU32 ornHighlight = ImGui::ColorConvertFloat4ToU32(
-                        ImVec4(tier.highlightColor[0], tier.highlightColor[1], tier.highlightColor[2], alpha));
-                    ImU32 ornOutline = IM_COL32(0, 0, 0, (int)(alpha * 255.0f));
-
-                    // Calculate outline width scaled for ornament size
-                    float ornOutlineWidth = outlineWidth * (ornamentSize / nameFontSize);
-
-                    // Glow color for ornaments
-                    ImU32 glowColor = ImGui::ColorConvertFloat4ToU32(ImVec4(Lc.x, Lc.y, Lc.z, alpha));
-
-                    // Use UTF-8 aware iteration for multi-byte characters
-                    if (!leftOrns.empty())
-                    {
-                        auto leftChars = Utf8ToChars(leftOrns);
-                        float cursorX = nameplateCenter.x - nameplateWidth * 0.5f - totalSpacing;
-                        // Draw characters in reverse order
-                        for (int i = static_cast<int>(leftChars.size()) - 1; i >= 0; --i)
-                        {
-                            const std::string& ch = leftChars[i];
-                            ImVec2 charSize = ornamentFont->CalcTextSizeA(ornamentSize, FLT_MAX, 0.0f, ch.c_str());
-                            cursorX -= charSize.x;
-                            ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
-
-                            // Draw glow
-                            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f && tierAllowsGlow)
-                            {
-                                TextEffects::AddTextGlow(drawList, ornamentFont, ornamentSize, charPos,
-                                                         ch.c_str(), glowColor, Settings::GlowRadius,
-                                                         Settings::GlowIntensity, Settings::GlowSamples);
-                            }
-
-                            // Draw ornament with effect
-                            ApplyTextEffect(drawList, ornamentFont, ornamentSize, charPos, ch.c_str(),
-                                            tier.nameEffect, ornColL, ornColR, ornHighlight, ornOutline, ornOutlineWidth,
-                                            phase01, strength, textSizeScale, alpha);
-                        }
-                    }
-
-                    if (!rightOrns.empty())
-                    {
-                        auto rightChars = Utf8ToChars(rightOrns);
-                        float cursorX = nameplateCenter.x + nameplateWidth * 0.5f + totalSpacing;
-                        for (size_t i = 0; i < rightChars.size(); ++i)
-                        {
-                            const std::string& ch = rightChars[i];
-                            ImVec2 charSize = ornamentFont->CalcTextSizeA(ornamentSize, FLT_MAX, 0.0f, ch.c_str());
-                            ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
-
-                            // Draw glow
-                            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f && tierAllowsGlow)
-                            {
-                                TextEffects::AddTextGlow(drawList, ornamentFont, ornamentSize, charPos,
-                                                         ch.c_str(), glowColor, Settings::GlowRadius,
-                                                         Settings::GlowIntensity, Settings::GlowSamples);
-                            }
-
-                            // Draw ornament with effect
-                            ApplyTextEffect(drawList, ornamentFont, ornamentSize, charPos, ch.c_str(),
-                                            tier.nameEffect, ornColL, ornColR, ornHighlight, ornOutline, ornOutlineWidth,
-                                            phase01, strength, textSizeScale, alpha);
-
-                            cursorX += charSize.x;
-                        }
-                    }
+            if (!rightOrns.empty())
+            {
+                auto rightChars = Utf8ToChars(rightOrns);
+                float cursorX = nameplateCenter.x + nameplateWidth * 0.5f + totalSpacing;
+                for (size_t i = 0; i < rightChars.size(); ++i)
+                {
+                    const std::string& ch = rightChars[i];
+                    ImVec2 charSize = ornamentFont->CalcTextSizeA(ornamentSize, FLT_MAX, 0.0f, ch.c_str());
+                    ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
+                    drawOrnChar(charPos, ch.c_str());
+                    cursorX += charSize.x;
                 }
             }
         }
@@ -2071,8 +2056,8 @@ namespace Renderer
         }
 
         // Overlap prevention: resolve overlapping labels before drawing
-        s_overlapOffsets.clear();
-        if (Settings::EnableOverlapPrevention)
+        OverlapOffsets().clear();
+        if (Settings::Visual().EnableOverlapPrevention)
         {
             struct LabelRect {
                 int idx;
@@ -2115,8 +2100,8 @@ namespace Renderer
             });
 
             // Iterative relaxation: push lower-priority labels down
-            float padding = Settings::OverlapPaddingY;
-            for (int pass = 0; pass < Settings::OverlapIterations; ++pass)
+            float padding = Settings::Visual().OverlapPaddingY;
+            for (int pass = 0; pass < Settings::Visual().OverlapIterations; ++pass)
             {
                 for (int i = 0; i < static_cast<int>(labelRects.size()); ++i)
                 {
@@ -2139,7 +2124,7 @@ namespace Renderer
             {
                 if (std::abs(lr.yOffset) > 0.01f)
                 {
-                    s_overlapOffsets[localSnap[lr.idx].formID] = lr.yOffset;
+                    OverlapOffsets()[localSnap[lr.idx].formID] = lr.yOffset;
                 }
             }
         }

@@ -98,39 +98,10 @@ namespace Settings
     float ScaleSettleTime;
     float PositionSettleTime;
 
-    // Distance-Based Outline
-    bool  EnableDistanceOutlineScale = false;
-    float OutlineDistanceMin = 0.8f;
-    float OutlineDistanceMax = 1.5f;
-
-    // Minimum Readable Size
-    float MinimumPixelHeight = 0.0f;
-
-    // LOD by Distance
-    bool  EnableLOD = false;
-    float LODFarDistance = 1800.0f;
-    float LODMidDistance = 800.0f;
-    float LODTransitionRange = 200.0f;
-
-    // Visual Hierarchy
-    float TitleAlphaMultiplier = 0.80f;
-    float LevelAlphaMultiplier = 0.85f;
-
-    // Overlap Prevention
-    bool  EnableOverlapPrevention = false;
-    float OverlapPaddingY = 4.0f;
-    int   OverlapIterations = 3;
-
-    // Position Smoothing Tuning
-    float PositionSmoothingBlend = 1.0f;
-    float LargeMovementThreshold = 50.0f;
-    float LargeMovementBlend = 0.5f;
-
-    // Tier Effect Gating
-    bool  EnableTierEffectGating = false;
-    int   GlowMinTier = 5;
-    int   ParticleMinTier = 10;
-    int   OrnamentMinTier = 10;
+    VisualSettings& Visual() {
+        static VisualSettings vs;
+        return vs;
+    }
 
     // Font Settings
     std::string NameFontPath;
@@ -588,32 +559,32 @@ namespace Settings
             else if (key == "ScaleSettleTime") ScaleSettleTime = ParseFloat(val, 0.46f);
             else if (key == "PositionSettleTime") PositionSettleTime = ParseFloat(val, 0.38f);
             // Distance-Based Outline
-            else if (key == "EnableDistanceOutlineScale") EnableDistanceOutlineScale = (ParseInt(val, 0) != 0);
-            else if (key == "OutlineDistanceMin") OutlineDistanceMin = ParseFloat(val, 0.8f);
-            else if (key == "OutlineDistanceMax") OutlineDistanceMax = ParseFloat(val, 1.5f);
+            else if (key == "EnableDistanceOutlineScale") Visual().EnableDistanceOutlineScale = (ParseInt(val, 0) != 0);
+            else if (key == "OutlineDistanceMin") Visual().OutlineDistanceMin = ParseFloat(val, 0.8f);
+            else if (key == "OutlineDistanceMax") Visual().OutlineDistanceMax = ParseFloat(val, 1.5f);
             // Minimum Readable Size
-            else if (key == "MinimumPixelHeight") MinimumPixelHeight = ParseFloat(val, 0.0f);
+            else if (key == "MinimumPixelHeight") Visual().MinimumPixelHeight = ParseFloat(val, 0.0f);
             // LOD by Distance
-            else if (key == "EnableLOD") EnableLOD = (ParseInt(val, 0) != 0);
-            else if (key == "LODFarDistance") LODFarDistance = ParseFloat(val, 1800.0f);
-            else if (key == "LODMidDistance") LODMidDistance = ParseFloat(val, 800.0f);
-            else if (key == "LODTransitionRange") LODTransitionRange = ParseFloat(val, 200.0f);
+            else if (key == "EnableLOD") Visual().EnableLOD = (ParseInt(val, 0) != 0);
+            else if (key == "LODFarDistance") Visual().LODFarDistance = ParseFloat(val, 1800.0f);
+            else if (key == "LODMidDistance") Visual().LODMidDistance = ParseFloat(val, 800.0f);
+            else if (key == "LODTransitionRange") Visual().LODTransitionRange = ParseFloat(val, 200.0f);
             // Visual Hierarchy
-            else if (key == "TitleAlphaMultiplier") TitleAlphaMultiplier = ParseFloat(val, 0.80f);
-            else if (key == "LevelAlphaMultiplier") LevelAlphaMultiplier = ParseFloat(val, 0.85f);
+            else if (key == "TitleAlphaMultiplier") Visual().TitleAlphaMultiplier = ParseFloat(val, 0.80f);
+            else if (key == "LevelAlphaMultiplier") Visual().LevelAlphaMultiplier = ParseFloat(val, 0.85f);
             // Overlap Prevention
-            else if (key == "EnableOverlapPrevention") EnableOverlapPrevention = (ParseInt(val, 0) != 0);
-            else if (key == "OverlapPaddingY") OverlapPaddingY = ParseFloat(val, 4.0f);
-            else if (key == "OverlapIterations") OverlapIterations = ParseInt(val, 3);
+            else if (key == "EnableOverlapPrevention") Visual().EnableOverlapPrevention = (ParseInt(val, 0) != 0);
+            else if (key == "OverlapPaddingY") Visual().OverlapPaddingY = ParseFloat(val, 4.0f);
+            else if (key == "OverlapIterations") Visual().OverlapIterations = ParseInt(val, 3);
             // Position Smoothing Tuning
-            else if (key == "PositionSmoothingBlend") PositionSmoothingBlend = ParseFloat(val, 1.0f);
-            else if (key == "LargeMovementThreshold") LargeMovementThreshold = ParseFloat(val, 50.0f);
-            else if (key == "LargeMovementBlend") LargeMovementBlend = ParseFloat(val, 0.5f);
+            else if (key == "PositionSmoothingBlend") Visual().PositionSmoothingBlend = ParseFloat(val, 1.0f);
+            else if (key == "LargeMovementThreshold") Visual().LargeMovementThreshold = ParseFloat(val, 50.0f);
+            else if (key == "LargeMovementBlend") Visual().LargeMovementBlend = ParseFloat(val, 0.5f);
             // Tier Effect Gating
-            else if (key == "EnableTierEffectGating") EnableTierEffectGating = (ParseInt(val, 0) != 0);
-            else if (key == "GlowMinTier") GlowMinTier = ParseInt(val, 5);
-            else if (key == "ParticleMinTier") ParticleMinTier = ParseInt(val, 10);
-            else if (key == "OrnamentMinTier") OrnamentMinTier = ParseInt(val, 10);
+            else if (key == "EnableTierEffectGating") Visual().EnableTierEffectGating = (ParseInt(val, 0) != 0);
+            else if (key == "GlowMinTier") Visual().GlowMinTier = ParseInt(val, 5);
+            else if (key == "ParticleMinTier") Visual().ParticleMinTier = ParseInt(val, 10);
+            else if (key == "OrnamentMinTier") Visual().OrnamentMinTier = ParseInt(val, 10);
             // Font Settings
             else if (key == "NameFontPath") NameFontPath = val;
             else if (key == "NameFontSize") NameFontSize = ParseFloat(val, 0.0f);

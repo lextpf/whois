@@ -333,39 +333,37 @@ namespace Settings
     extern float ScaleSettleTime;        ///< Font scale settle time in seconds (default: 0.46)
     extern float PositionSettleTime;     ///< Position settle time for NPCs in seconds (default: 0.38)
 
-    // Distance-Based Outline
-    extern bool  EnableDistanceOutlineScale; ///< Scale outline width by distance (default: false)
-    extern float OutlineDistanceMin;         ///< Outline multiplier at close range (default: 0.8)
-    extern float OutlineDistanceMax;         ///< Outline multiplier at far range (default: 1.5)
-
-    // Minimum Readable Size
-    extern float MinimumPixelHeight;         ///< Min pixel height for name text, 0=disabled (default: 0.0)
-
-    // LOD by Distance
-    extern bool  EnableLOD;                  ///< Enable distance-based content LOD (default: false)
-    extern float LODFarDistance;             ///< Beyond this: name+level only (default: 1800.0)
-    extern float LODMidDistance;             ///< Beyond this: no particles/ornaments (default: 800.0)
-    extern float LODTransitionRange;        ///< Smooth transition width in game units (default: 200.0)
-
-    // Visual Hierarchy
-    extern float TitleAlphaMultiplier;       ///< Alpha multiplier for title text (default: 0.80)
-    extern float LevelAlphaMultiplier;       ///< Alpha multiplier for level text (default: 0.85)
-
-    // Overlap Prevention
-    extern bool  EnableOverlapPrevention;    ///< Push overlapping labels apart (default: false)
-    extern float OverlapPaddingY;            ///< Vertical padding between labels (default: 4.0)
-    extern int   OverlapIterations;          ///< Relaxation passes for overlap resolution (default: 3)
-
-    // Position Smoothing Tuning
-    extern float PositionSmoothingBlend;     ///< 1.0=moving-avg, 0.0=exponential (default: 1.0)
-    extern float LargeMovementThreshold;     ///< Pixel threshold for large movement handling (default: 50.0)
-    extern float LargeMovementBlend;         ///< Blend factor for large movements (default: 0.5)
-
-    // Tier Effect Gating
-    extern bool  EnableTierEffectGating;     ///< Gate effects by tier index (default: false)
-    extern int   GlowMinTier;               ///< Minimum tier for glow effects (default: 5)
-    extern int   ParticleMinTier;            ///< Minimum tier for particle effects (default: 10)
-    extern int   OrnamentMinTier;            ///< Minimum tier for ornament display (default: 10)
+    /// Visual polish settings, encapsulated to avoid non-const globals.
+    struct VisualSettings {
+        // Distance-Based Outline
+        bool  EnableDistanceOutlineScale = false; ///< Scale outline width by distance
+        float OutlineDistanceMin = 0.8f;          ///< Outline multiplier at close range
+        float OutlineDistanceMax = 1.5f;          ///< Outline multiplier at far range
+        // Minimum Readable Size
+        float MinimumPixelHeight = 0.0f;          ///< Min pixel height for name text, 0=disabled
+        // LOD by Distance
+        bool  EnableLOD = false;                  ///< Enable distance-based content LOD
+        float LODFarDistance = 1800.0f;           ///< Beyond this: name+level only
+        float LODMidDistance = 800.0f;            ///< Beyond this: no particles/ornaments
+        float LODTransitionRange = 200.0f;        ///< Smooth transition width in game units
+        // Visual Hierarchy
+        float TitleAlphaMultiplier = 0.80f;       ///< Alpha multiplier for title text
+        float LevelAlphaMultiplier = 0.85f;       ///< Alpha multiplier for level text
+        // Overlap Prevention
+        bool  EnableOverlapPrevention = false;     ///< Push overlapping labels apart
+        float OverlapPaddingY = 4.0f;              ///< Vertical padding between labels
+        int   OverlapIterations = 3;               ///< Relaxation passes for overlap resolution
+        // Position Smoothing Tuning
+        float PositionSmoothingBlend = 1.0f;       ///< 1.0=moving-avg, 0.0=exponential
+        float LargeMovementThreshold = 50.0f;      ///< Pixel threshold for large movement handling
+        float LargeMovementBlend = 0.5f;           ///< Blend factor for large movements
+        // Tier Effect Gating
+        bool  EnableTierEffectGating = false;       ///< Gate effects by tier index
+        int   GlowMinTier = 5;                     ///< Minimum tier for glow effects
+        int   ParticleMinTier = 10;                ///< Minimum tier for particle effects
+        int   OrnamentMinTier = 10;                ///< Minimum tier for ornament display
+    };
+    VisualSettings& Visual();
 
     // Font Settings
     extern std::string NameFontPath;     ///< Path to name font TTF file
