@@ -314,6 +314,8 @@ namespace Renderer
     static std::unordered_map<uint32_t, ActorCache> s_cache;
     /// Current frame counter for cache management
     static uint32_t s_frame = 0;
+    /// Per-frame overlap Y offsets, keyed by form ID
+    static std::unordered_map<uint32_t, float> s_overlapOffsets;
 
     /// Snapshot of actor data for rendering (thread-safe)
     static std::vector<ActorDrawData> s_snapshot;
@@ -926,6 +928,24 @@ namespace Renderer
         float alphaTarget = 1.0f - fadeT;         // Invert: 1.0 at near, 0.0 at far
         alphaTarget = alphaTarget * alphaTarget;  // Square for more opacity at near range
 
+        // LOD factors: control content visibility by distance band
+        float lodTitleFactor = 1.0f;
+        float lodEffectsFactor = 1.0f;
+
+        if (Settings::EnableLOD) {
+            float transRange = std::max(1.0f, Settings::LODTransitionRange);
+
+            // Title hidden beyond LODFarDistance
+            float titleFadeT = TextEffects::Saturate(
+                (dist - Settings::LODFarDistance) / transRange);
+            lodTitleFactor = 1.0f - TextEffects::SmoothStep(titleFadeT);
+
+            // Effects (particles, ornaments) hidden beyond LODMidDistance
+            float effectsFadeT = TextEffects::Saturate(
+                (dist - Settings::LODMidDistance) / transRange);
+            lodEffectsFactor = 1.0f - TextEffects::SmoothStep(effectsFadeT);
+        }
+
         // Calculate font size scale target based on distance
         // Names get smaller as actors move farther away
         float scaleT = TextEffects::Saturate((dist - Settings::ScaleStartDistance) / (Settings::ScaleEndDistance - Settings::ScaleStartDistance));
@@ -955,6 +975,12 @@ namespace Renderer
             // Blend player-distance scale and camera-distance scale
             // Use a weighted min to avoid popping when zooming in
             textScaleTarget = std::min(textScaleTarget, camTextScale);
+        }
+
+        // Enforce minimum readable text size
+        if (Settings::MinimumPixelHeight > 0.0f) {
+            float minScale = Settings::MinimumPixelHeight / Settings::NameFontSize;
+            textScaleTarget = std::max(textScaleTarget, minScale);
         }
 
         // Project world position to screen space
@@ -1010,25 +1036,33 @@ namespace Renderer
             entry.textSizeScale += (textScaleTarget - entry.textSizeScale) * sLerp;
             entry.occlusionSmooth += (occlusionTarget - entry.occlusionSmooth) * oLerp;
 
-            // Use moving average for position to filter out periodic jitter
-            // This is more effective than exponential smoothing for regular oscillations
+            // Blend moving-average and exponential smoothing for position
             ImVec2 targetPos(screenPos.x, screenPos.y);
-            ImVec2 smoothedPos = entry.AddAndGetSmoothed(targetPos);
+            ImVec2 maSmoothed = entry.AddAndGetSmoothed(targetPos);
+
+            // Exponential smoothing toward raw target
+            ImVec2 expSmoothed;
+            expSmoothed.x = entry.smooth.x + (targetPos.x - entry.smooth.x) * pLerp;
+            expSmoothed.y = entry.smooth.y + (targetPos.y - entry.smooth.y) * pLerp;
+
+            // PositionSmoothingBlend: 1.0 = pure moving-avg, 0.0 = pure exponential
+            float blend = Settings::PositionSmoothingBlend;
+            ImVec2 smoothedPos;
+            smoothedPos.x = expSmoothed.x + (maSmoothed.x - expSmoothed.x) * blend;
+            smoothedPos.y = expSmoothed.y + (maSmoothed.y - expSmoothed.y) * blend;
 
             // For large movements, blend more toward target for responsiveness
             float dx = targetPos.x - entry.smooth.x;
             float dy = targetPos.y - entry.smooth.y;
-            float dist = std::sqrt(dx * dx + dy * dy);
+            float moveDist = std::sqrt(dx * dx + dy * dy);
 
-            if (dist > 50.0f)
+            if (moveDist > Settings::LargeMovementThreshold)
             {
-                // Large movement - blend toward moving average quickly
-                entry.smooth.x += (smoothedPos.x - entry.smooth.x) * 0.5f;
-                entry.smooth.y += (smoothedPos.y - entry.smooth.y) * 0.5f;
+                entry.smooth.x += (smoothedPos.x - entry.smooth.x) * Settings::LargeMovementBlend;
+                entry.smooth.y += (smoothedPos.y - entry.smooth.y) * Settings::LargeMovementBlend;
             }
             else
             {
-                // Normal movement - use moving average directly
                 entry.smooth = smoothedPos;
             }
 
@@ -1099,6 +1133,11 @@ namespace Renderer
         }
         tierIdx = std::clamp(tierIdx, 0, static_cast<int>(Settings::Tiers.size()) - 1);
         const Settings::TierDefinition &tier = Settings::Tiers[tierIdx];
+
+        // Tier effect gating: restrict heavy effects to high-tier actors
+        bool tierAllowsGlow = !Settings::EnableTierEffectGating || tierIdx >= Settings::GlowMinTier;
+        bool tierAllowsParticles = !Settings::EnableTierEffectGating || tierIdx >= Settings::ParticleMinTier;
+        bool tierAllowsOrnaments = !Settings::EnableTierEffectGating || tierIdx >= Settings::OrnamentMinTier;
 
         // Check for special title match
         // Special titles override normal tier styling for MMORPG-style nameplates
@@ -1227,8 +1266,8 @@ namespace Renderer
 
         // Reduced alpha for secondary text elements (title, level, separator)
         // This makes the name stand out more as the primary element
-        const float titleAlpha = alpha * 0.8f;   // Title slightly subtle, above the name
-        const float levelAlpha = alpha * 0.85f;  // Level/separator slightly subdued
+        const float titleAlpha = alpha * Settings::TitleAlphaMultiplier;
+        const float levelAlpha = alpha * Settings::LevelAlphaMultiplier;
 
         // Title colors
         ImU32 colLTitle = ImGui::ColorConvertFloat4ToU32(ImVec4(LcTitle.x, LcTitle.y, LcTitle.z, titleAlpha));
@@ -1250,8 +1289,17 @@ namespace Renderer
 
         // Calculate outline width scaled proportionally to font size
         // Uses the configured NameFontSize as reference so outline looks correct at default zoom
-        auto calcOutlineWidth = [=](float fontSize) {
-            return baseOutlineWidth * (fontSize / Settings::NameFontSize);
+        auto calcOutlineWidth = [=, &d](float fontSize) {
+            float w = baseOutlineWidth * (fontSize / Settings::NameFontSize);
+            if (Settings::EnableDistanceOutlineScale) {
+                float distT = TextEffects::Saturate(
+                    (d.distToPlayer - Settings::FadeStartDistance) /
+                    (Settings::FadeEndDistance - Settings::FadeStartDistance));
+                float distMul = Settings::OutlineDistanceMin +
+                                (Settings::OutlineDistanceMax - Settings::OutlineDistanceMin) * distT;
+                w *= distMul;
+            }
+            return w;
         };
 
         // Get fractional part of float
@@ -1522,6 +1570,14 @@ namespace Renderer
         // startPos is the anchor point
         ImVec2 startPos = entry.smooth;
 
+        // Apply overlap prevention offset
+        if (Settings::EnableOverlapPrevention)
+        {
+            auto oIt = s_overlapOffsets.find(d.formID);
+            if (oIt != s_overlapOffsets.end())
+                startPos.y += oIt->second;
+        }
+
         // Total width is the larger of main line or title
         float totalWidth = std::max(mainLineWidth, titleSize.x);
 
@@ -1543,8 +1599,9 @@ namespace Renderer
 
         // Draw particles first so they appear behind everything else
         bool tierHasParticles = !tier.particleTypes.empty() && tier.particleTypes != "None";
-        bool showParticles = (d.isPlayer && Settings::EnableParticleAura && tierHasParticles)
-                          || (specialTitle && specialTitle->forceParticles);
+        bool showParticles = ((d.isPlayer && Settings::EnableParticleAura && tierHasParticles && tierAllowsParticles)
+                          || (specialTitle && specialTitle->forceParticles))
+                          && lodEffectsFactor > 0.01f;
         if (showParticles)
         {
             // Use special title's color for particles, or tier highlight color for normal
@@ -1637,8 +1694,9 @@ namespace Renderer
         const std::string& rightOrns = (specialTitle && !specialTitle->rightOrnaments.empty())
             ? specialTitle->rightOrnaments : tier.rightOrnaments;
         bool hasOrnaments = !leftOrns.empty() || !rightOrns.empty();
-        bool showOrnaments = (d.isPlayer && Settings::EnableOrnaments && hasOrnaments)
-                          || (specialTitle && specialTitle->forceOrnaments && hasOrnaments);
+        bool showOrnaments = ((d.isPlayer && Settings::EnableOrnaments && hasOrnaments && tierAllowsOrnaments)
+                          || (specialTitle && specialTitle->forceOrnaments && hasOrnaments))
+                          && lodEffectsFactor > 0.01f;
         if (showOrnaments && !Settings::OrnamentFontPath.empty())
         {
             // Get ornament font
@@ -1687,7 +1745,7 @@ namespace Renderer
                             ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
 
                             // Draw glow
-                            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f)
+                            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f && tierAllowsGlow)
                             {
                                 TextEffects::AddTextGlow(drawList, ornamentFont, ornamentSize, charPos,
                                                          ch.c_str(), glowColor, Settings::GlowRadius,
@@ -1712,7 +1770,7 @@ namespace Renderer
                             ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
 
                             // Draw glow
-                            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f)
+                            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f && tierAllowsGlow)
                             {
                                 TextEffects::AddTextGlow(drawList, ornamentFont, ornamentSize, charPos,
                                                          ch.c_str(), glowColor, Settings::GlowRadius,
@@ -1731,20 +1789,21 @@ namespace Renderer
             }
         }
 
-        // Render Title, if present and has visible characters
-        if (titleDisplayText && *titleDisplayText)
+        // Render Title, if present and has visible characters (LOD: hidden at far distance)
+        if (titleDisplayText && *titleDisplayText && lodTitleFactor > 0.01f)
         {
             // Center title horizontally within totalWidth
             float titleOffsetX = (totalWidth - titleSize.x) * 0.5f;
             ImVec2 titlePos(startPos.x - totalWidth * 0.5f + titleOffsetX,  // Centered X
                             startPos.y + titleY);                           // Calculated Y
 
-            // Prepare colors for title
-            ImU32 titleColor = ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, alpha));
-            ImU32 titleShadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha * 0.5f));
+            // Prepare colors for title (apply LOD fade)
+            float lodTitleAlpha = alpha * lodTitleFactor;
+            ImU32 titleColor = ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, lodTitleAlpha));
+            ImU32 titleShadow = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, lodTitleAlpha * 0.5f));
 
             // Draw glow behind title
-            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f)
+            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f && tierAllowsGlow)
             {
                 // Use special glow color if available, otherwise tier left color
                 ImVec4 glowColorVec = specialTitle
@@ -1765,18 +1824,19 @@ namespace Renderer
                                      titlePos.y + Settings::TitleShadowOffsetY),
                               titleShadow, titleDisplayText);
 
+            float lodTitleAlphaFinal = titleAlpha * lodTitleFactor;
             if (d.isPlayer)
             {
                 // Apply tier-defined visual effect
                 ApplyTextEffect(drawList, fontTitle, titleFontSize, titlePos, titleDisplayText,
                                 tier.titleEffect, colLTitle, colRTitle, highlight, outlineColor, titleOutlineWidth,
-                                phase01, strength, textSizeScale, titleAlpha);
+                                phase01, strength, textSizeScale, lodTitleAlphaFinal);
             }
             else
             {
                 // NPC, use disposition color with simple outline
                 ImU32 dCol = ImGui::ColorConvertFloat4ToU32(WashColor(dispoCol));
-                ImU32 npcOutline = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, titleAlpha));
+                ImU32 npcOutline = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, lodTitleAlphaFinal));
                 TextEffects::AddTextOutline4(drawList, fontTitle, titleFontSize, titlePos, titleDisplayText, dCol, npcOutline, titleOutlineWidth);
             }
         }
@@ -1805,7 +1865,7 @@ namespace Renderer
             ImVec2 pos = ImVec2(currentPos.x, currentPos.y + vOffset);
 
             // Draw glow behind segment
-            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f)
+            if (Settings::EnableGlow && Settings::GlowIntensity > 0.0f && tierAllowsGlow)
             {
                 // Use special glow color if available, otherwise segment-appropriate color
                 ImVec4 glowCol = specialTitle
@@ -2008,6 +2068,80 @@ namespace Renderer
                 }
             }
             ++s_updateCounter;
+        }
+
+        // Overlap prevention: resolve overlapping labels before drawing
+        s_overlapOffsets.clear();
+        if (Settings::EnableOverlapPrevention)
+        {
+            struct LabelRect {
+                int idx;
+                float cy;       // screen Y center from cache
+                float halfH;    // approximate half-height
+                float dist;     // distance for priority
+                float yOffset;  // computed push offset
+                bool isPlayer;
+            };
+            std::vector<LabelRect> labelRects;
+
+            for (int i = 0; i < static_cast<int>(localSnap.size()); ++i)
+            {
+                const auto& d = localSnap[i];
+                auto cIt = s_cache.find(d.formID);
+                if (cIt == s_cache.end() || !cIt->second.initialized)
+                    continue;
+
+                const auto& entry = cIt->second;
+                if (entry.alphaSmooth * entry.occlusionSmooth <= 0.02f)
+                    continue;
+
+                float scale = entry.textSizeScale;
+                float approxHeight = Settings::NameFontSize * scale * 1.5f;
+
+                LabelRect lr;
+                lr.idx = i;
+                lr.cy = entry.smooth.y;
+                lr.halfH = approxHeight * 0.5f;
+                lr.dist = d.distToPlayer;
+                lr.yOffset = 0.0f;
+                lr.isPlayer = d.isPlayer;
+                labelRects.push_back(lr);
+            }
+
+            // Sort by priority: player first, then closest first
+            std::sort(labelRects.begin(), labelRects.end(), [](const LabelRect& a, const LabelRect& b) {
+                if (a.isPlayer != b.isPlayer) return a.isPlayer > b.isPlayer;
+                return a.dist < b.dist;
+            });
+
+            // Iterative relaxation: push lower-priority labels down
+            float padding = Settings::OverlapPaddingY;
+            for (int pass = 0; pass < Settings::OverlapIterations; ++pass)
+            {
+                for (int i = 0; i < static_cast<int>(labelRects.size()); ++i)
+                {
+                    for (int j = i + 1; j < static_cast<int>(labelRects.size()); ++j)
+                    {
+                        float botI = labelRects[i].cy + labelRects[i].yOffset + labelRects[i].halfH;
+                        float topJ = labelRects[j].cy + labelRects[j].yOffset - labelRects[j].halfH;
+
+                        float overlap = (botI + padding) - topJ;
+                        if (overlap > 0.0f)
+                        {
+                            labelRects[j].yOffset += overlap;
+                        }
+                    }
+                }
+            }
+
+            // Store offsets for DrawLabel to apply
+            for (const auto& lr : labelRects)
+            {
+                if (std::abs(lr.yOffset) > 0.01f)
+                {
+                    s_overlapOffsets[localSnap[lr.idx].formID] = lr.yOffset;
+                }
+            }
         }
 
         // Draw a label for each actor in the snapshot
