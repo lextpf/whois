@@ -241,91 +241,74 @@ namespace AppearanceTemplate
         return true;
     }
 
+    static RE::FormID ParseHexFormID(const std::string& str)
+    {
+        if (str.size() > 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
+            return static_cast<RE::FormID>(std::stoul(str.substr(2), nullptr, 16));
+        }
+        return static_cast<RE::FormID>(std::stoul(str, nullptr, 16));
+    }
+
+    static RE::FormID BuildFormID(const RE::TESFile* file, RE::FormID baseFormID)
+    {
+        if (file->IsLight()) {
+            uint32_t lightIndex = file->GetSmallFileCompileIndex();
+            return 0xFE000000 | (lightIndex << 12) | (baseFormID & 0xFFF);
+        }
+        return (static_cast<RE::FormID>(file->GetCompileIndex()) << 24) | (baseFormID & 0x00FFFFFF);
+    }
+
+    static const RE::TESFile* FindPluginByName(RE::TESDataHandler* dh, const std::string& name)
+    {
+        for (auto* file : dh->files) {
+            if (file && file->fileName && _stricmp(file->fileName, name.c_str()) == 0) {
+                return file;
+            }
+        }
+        return nullptr;
+    }
+
     RE::FormID ResolveFormID(const std::string& formIdStr, const std::string& pluginName)
     {
         if (formIdStr.empty() || pluginName.empty()) {
             return 0;
         }
 
-        // Parse the FormID from hex string
         RE::FormID baseFormID = 0;
         try {
-            // Handle "0x" prefix or raw hex
-            if (formIdStr.size() > 2 && formIdStr[0] == '0' && (formIdStr[1] == 'x' || formIdStr[1] == 'X')) {
-                baseFormID = static_cast<RE::FormID>(std::stoul(formIdStr.substr(2), nullptr, 16));
-            } else {
-                baseFormID = static_cast<RE::FormID>(std::stoul(formIdStr, nullptr, 16));
-            }
+            baseFormID = ParseHexFormID(formIdStr);
         } catch (...) {
             SKSE::log::error("AppearanceTemplate: Invalid FormID format: {}", formIdStr);
             return 0;
         }
 
-        // Get the data handler to look up the plugin
         auto dataHandler = RE::TESDataHandler::GetSingleton();
         if (!dataHandler) {
             SKSE::log::error("AppearanceTemplate: TESDataHandler not available");
             return 0;
         }
 
-        // Find the plugin's load order index
-        const RE::TESFile* plugin = nullptr;
-
-        // Check regular plugins
-        for (auto* file : dataHandler->files) {
-            if (file && file->fileName && _stricmp(file->fileName, pluginName.c_str()) == 0) {
-                plugin = file;
-                break;
-            }
-        }
-
+        const RE::TESFile* plugin = FindPluginByName(dataHandler, pluginName);
         if (!plugin) {
             SKSE::log::error("AppearanceTemplate: Plugin not found: {}", pluginName);
             return 0;
         }
 
-        // Build the FormID using the requested plugin's index
-        RE::FormID resolvedFormID = 0;
-        if (plugin->IsLight()) {
-            uint32_t lightIndex = plugin->GetSmallFileCompileIndex();
-            resolvedFormID = 0xFE000000 | (lightIndex << 12) | (baseFormID & 0xFFF);
-        } else {
-            resolvedFormID = (static_cast<RE::FormID>(plugin->GetCompileIndex()) << 24) | (baseFormID & 0x00FFFFFF);
-        }
-
-        // First attempt: Use the ID derived from the requested plugin
-        if (auto* form = RE::TESForm::LookupByID(resolvedFormID)) {
+        RE::FormID resolvedFormID = BuildFormID(plugin, baseFormID);
+        if (RE::TESForm::LookupByID(resolvedFormID)) {
             SKSE::log::info("AppearanceTemplate: Resolved {}|{} to FormID {:08X}", formIdStr, pluginName, resolvedFormID);
             return resolvedFormID;
         }
 
-        // Fallback: Search all loaded masters for the base FormID
-        RE::FormID fallbackID = 0;
+        // Fallback: search all loaded plugins for the base FormID
         for (auto* file : dataHandler->files) {
             if (!file) continue;
-            if (file->IsLight()) {
-                // Master records won't live in ESLs, but try anyway for completeness
-                uint32_t lightIndex = file->GetSmallFileCompileIndex();
-                RE::FormID candidate = 0xFE000000 | (lightIndex << 12) | (baseFormID & 0xFFF);
-                if (RE::TESForm::LookupByID(candidate)) {
-                    fallbackID = candidate;
-                    plugin = file;
-                    break;
-                }
-            } else {
-                RE::FormID candidate = (static_cast<RE::FormID>(file->GetCompileIndex()) << 24) | (baseFormID & 0x00FFFFFF);
-                if (RE::TESForm::LookupByID(candidate)) {
-                    fallbackID = candidate;
-                    plugin = file;
-                    break;
-                }
+            RE::FormID candidate = BuildFormID(file, baseFormID);
+            if (RE::TESForm::LookupByID(candidate)) {
+                SKSE::log::info("AppearanceTemplate: Resolved via fallback master {} to FormID {:08X}",
+                    file->fileName ? file->fileName : "unknown", candidate);
+                return candidate;
             }
-        }
-
-        if (fallbackID != 0) {
-            SKSE::log::info("AppearanceTemplate: Resolved via fallback master {} to FormID {:08X}",
-                plugin && plugin->fileName ? plugin->fileName : "unknown", fallbackID);
-            return fallbackID;
         }
 
         SKSE::log::error("AppearanceTemplate: Failed to resolve FormID {} in any loaded plugin", formIdStr);
@@ -508,11 +491,11 @@ namespace AppearanceTemplate
         if (auto templateTints = templateNPC->tintLayers) {
             // Get or create player tint layers
             if (!playerBase->tintLayers) {
-                playerBase->tintLayers = new RE::BSTArray<RE::TESNPC::Layer*>();
+                playerBase->tintLayers = std::make_unique<RE::BSTArray<RE::TESNPC::Layer*>>().release();
             } else {
-                // Clear existing tints
+                // Clear existing tints (unique_ptr handles deletion)
                 for (auto* layer : *playerBase->tintLayers) {
-                    delete layer;
+                    auto cleanup = std::unique_ptr<RE::TESNPC::Layer>(layer);
                 }
                 playerBase->tintLayers->clear();
             }
@@ -520,12 +503,12 @@ namespace AppearanceTemplate
             // Copy tint layers
             for (auto* srcLayer : *templateTints) {
                 if (srcLayer) {
-                    auto* newLayer = new RE::TESNPC::Layer();
+                    auto newLayer = std::make_unique<RE::TESNPC::Layer>();
                     newLayer->tintIndex = srcLayer->tintIndex;
                     newLayer->tintColor = srcLayer->tintColor;
                     newLayer->preset = srcLayer->preset;
                     newLayer->interpolationValue = srcLayer->interpolationValue;
-                    playerBase->tintLayers->push_back(newLayer);
+                    playerBase->tintLayers->push_back(newLayer.release());
                 }
             }
             SKSE::log::info("AppearanceTemplate: Copied {} tint layers", playerBase->tintLayers->size());
@@ -554,7 +537,7 @@ namespace AppearanceTemplate
             SKSE::log::info("AppearanceTemplate: Copied face morphs and parts");
         } else if (templateNPC->faceData && !playerBase->faceData) {
             // Allocate face data for player if needed
-            playerBase->faceData = new RE::TESNPC::FaceData();
+            playerBase->faceData = std::make_unique<RE::TESNPC::FaceData>().release();
             for (int i = 0; i < RE::TESNPC::FaceData::Morphs::kTotal; ++i) {
                 playerBase->faceData->morphs[i] = templateNPC->faceData->morphs[i];
             }
@@ -641,6 +624,33 @@ namespace AppearanceTemplate
                 SKSE::log::info("AppearanceTemplate: Player appearance update completed");
             }
         });
+    }
+
+    static void ProcessSpawnedActor(RE::ObjectRefHandle handle, int framesRemaining)
+    {
+        if (framesRemaining > 0) {
+            SKSE::GetTaskInterface()->AddTask([handle, framesRemaining]() {
+                ProcessSpawnedActor(handle, framesRemaining - 1);
+            });
+            return;
+        }
+
+        auto spawnedRef = handle.get();
+        if (!spawnedRef) {
+            SKSE::log::warn("AppearanceTemplate: Spawned actor no longer valid");
+            return;
+        }
+
+        auto* tempActor = spawnedRef->As<RE::Actor>();
+        auto* player = RE::PlayerCharacter::GetSingleton();
+
+        if (tempActor && player && Settings::TemplateCopyOutfit) {
+            SKSE::log::info("AppearanceTemplate: Copying outfit from temporary actor...");
+            CopyOutfitFromActor(tempActor, player);
+        }
+
+        spawnedRef->Disable();
+        SKSE::log::info("AppearanceTemplate: Temporary actor disabled");
     }
 
     bool ApplyIfConfigured()
@@ -740,33 +750,8 @@ namespace AppearanceTemplate
 
                     RE::ObjectRefHandle spawnedHandle = spawnedActor->GetHandle();
 
-                    // Wait 5 frames for actor to fully load
-                    SKSE::GetTaskInterface()->AddTask([spawnedHandle]() {
-                        SKSE::GetTaskInterface()->AddTask([spawnedHandle]() {
-                            SKSE::GetTaskInterface()->AddTask([spawnedHandle]() {
-                                SKSE::GetTaskInterface()->AddTask([spawnedHandle]() {
-                                    SKSE::GetTaskInterface()->AddTask([spawnedHandle]() {
-                                        auto spawnedRef = spawnedHandle.get();
-                                        if (!spawnedRef) {
-                                            SKSE::log::warn("AppearanceTemplate: Spawned actor no longer valid");
-                                            return;
-                                        }
-
-                                        auto* tempActor = spawnedRef->As<RE::Actor>();
-                                        auto* player = RE::PlayerCharacter::GetSingleton();
-
-                                        if (tempActor && player && Settings::TemplateCopyOutfit) {
-                                            SKSE::log::info("AppearanceTemplate: Copying outfit from temporary actor...");
-                                            CopyOutfitFromActor(tempActor, player);
-                                        }
-
-                                        spawnedRef->Disable();
-                                        SKSE::log::info("AppearanceTemplate: Temporary actor disabled");
-                                    });
-                                });
-                            });
-                        });
-                    });
+                    // Wait 5 frames for actor to fully load, then copy outfit
+                    ProcessSpawnedActor(spawnedHandle, 5);
                 } else {
                     SKSE::log::warn("AppearanceTemplate: Spawned reference is not an actor");
                     spawned->Disable();
@@ -812,14 +797,12 @@ namespace AppearanceTemplate
             auto playerInv = player->GetInventory();
             bool hasItem = false;
             for (const auto& [pForm, pData] : playerInv) {
-                if (pForm == form) {
-                    hasItem = true;
-                    // Equip it if not already equipped
-                    if (!pData.second->IsWorn()) {
-                        RE::ActorEquipManager::GetSingleton()->EquipObject(player, armor);
-                    }
-                    break;
+                if (pForm != form) continue;
+                hasItem = true;
+                if (!pData.second->IsWorn()) {
+                    RE::ActorEquipManager::GetSingleton()->EquipObject(player, armor);
                 }
+                break;
             }
 
             if (!hasItem) {

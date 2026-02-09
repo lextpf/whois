@@ -242,7 +242,7 @@ extern "C" __declspec(dllexport) bool __cdecl SKSEPlugin_Load(const SKSE::LoadIn
  *
  * Provides version, name, and compatibility info to SKSE.
  */
-extern "C" __declspec(dllexport) constinit auto SKSEPlugin_Version = []() {
+extern "C" __declspec(dllexport) constinit const auto SKSEPlugin_Version = []() {
     SKSE::PluginVersionData version;
     version.PluginVersion(REL::Version(0, 1, 0, 0));
     version.PluginName("whois");

@@ -514,10 +514,33 @@ namespace Renderer
         return true;
     }
 
+    /// Check occlusion for an actor, using cached results when available.
+    static void UpdateOcclusionForActor(ActorDrawData& d, RE::Actor* a, RE::Actor* player)
+    {
+        auto cacheIt = s_cache.find(d.formID);
+
+        // Use cached result if fresh enough
+        if (cacheIt != s_cache.end() && cacheIt->second.initialized) {
+            uint32_t framesSince = s_frame - cacheIt->second.lastOcclusionCheckFrame;
+            if (framesSince < static_cast<uint32_t>(Settings::OcclusionCheckInterval)) {
+                d.isOccluded = cacheIt->second.cachedOccluded;
+                return;
+            }
+        }
+
+        // Perform fresh occlusion check using nameplate world position
+        d.isOccluded = Occlusion::IsActorOccluded(a, player, d.worldPos);
+
+        // Update cache with the fresh result
+        if (cacheIt != s_cache.end()) {
+            cacheIt->second.lastOcclusionCheckFrame = s_frame;
+            cacheIt->second.cachedOccluded = d.isOccluded;
+        }
+    }
+
     static void UpdateSnapshot_GameThread()
     {
         // RAII struct to ensure the update flag is cleared when function exits
-        // This guarantees cleanup even if we early-return
         struct ClearFlag
         {
             ~ClearFlag() { s_updateQueued.store(false); }
@@ -529,13 +552,11 @@ namespace Renderer
 
         if (!allow)
         {
-            // Clear snapshot so rendering doesn't show stale data
             std::lock_guard<std::mutex> lock(s_snapshotLock);
             s_snapshot.clear();
             return;
         }
 
-        // Get player and process lists (contains all active actors)
         auto *player = GetPlayer();
         auto *pl = RE::ProcessLists::GetSingleton();
         if (!player || !pl)
@@ -545,13 +566,10 @@ namespace Renderer
             return;
         }
 
-        // Limits to prevent performance issues in crowded areas
         constexpr int kMaxActors = RenderConstants::kMaxActors;
         constexpr int kMaxScan = RenderConstants::kMaxScan;
         const float kMaxDistSq = Settings::MaxScanDistance * Settings::MaxScanDistance;
 
-        // Use temporary buffer to collect data without holding the snapshot lock
-        // This minimizes lock contention with the render thread
         static std::vector<ActorDrawData> tempBuf;
         tempBuf.clear();
         tempBuf.reserve(kMaxActors);
@@ -564,128 +582,51 @@ namespace Renderer
             ActorDrawData d;
             d.formID = player->GetFormID();
             d.level = player->GetLevel();
-
-            // Get player's display name
             const char *rawName = player->GetDisplayFullName();
-            if (rawName)
-            {
-                d.name = Capitalize(rawName);  // Title case
-            }
-            else
-            {
-                d.name = "Player";  // Fallback if name lookup fails
-            }
-
-            // Position the nameplate above the player's head
+            d.name = rawName ? Capitalize(rawName) : "Player";
             d.worldPos = playerPos;
-            d.worldPos.z += player->GetHeight() + Settings::VerticalOffset;  // Configurable offset above head
-
-            d.distToPlayer = 0.0f;  // Distance to self is zero
-            d.isPlayer = true;      // Flag for special rendering (uses tier effects)
+            d.worldPos.z += player->GetHeight() + Settings::VerticalOffset;
+            d.distToPlayer = 0.0f;
+            d.isPlayer = true;
             tempBuf.push_back(std::move(d));
         }
 
-        int added = 1;    // Track how many actors we've added (player counts as 1)
-        int scanned = 0;  // Track how many we've iterated (for early exit)
+        int added = 1;
+        int scanned = 0;
 
-        // Iterate through high-priority actors (NPCs in active processing)
         for (auto &h : pl->highActorHandles)
         {
-            // Stop if we've hit our limits
             if (added >= kMaxActors || scanned >= kMaxScan)
-            {
                 break;
-            }
             ++scanned;
 
-            // Resolve the actor handle to a pointer
             auto aSP = h.get();
             auto *a = aSP.get();
-            if (!a || a == player)
-            {
-                continue;  // Skip invalid or player
-            }
-
-            // Skip dead actors
-            if (a->IsDead())
-            {
+            if (!a || a == player || a->IsDead())
                 continue;
-            }
 
-            // Check distance, use squared distance to avoid expensive sqrt
             const float distSq = playerPos.GetSquaredDistance(a->GetPosition());
             if (distSq > kMaxDistSq)
-            {
-                continue;  // Too far away, skip
-            }
+                continue;
 
-            // Create actor data for rendering
             ActorDrawData d;
-            d.formID = a->GetFormID();  // Unique ID for caching
+            d.formID = a->GetFormID();
             d.level = a->GetLevel();
-
-            // Get NPC's display name
             const char *rawName = a->GetDisplayFullName();
-            if (rawName)
-            {
-                d.name = Capitalize(rawName);  // Title case
-            }
-            else
-            {
-                d.name = "";  // Empty name for unnamed NPCs
-            }
-
-            // Position above NPC's head
+            d.name = rawName ? Capitalize(rawName) : "";
             d.worldPos = a->GetPosition();
-            d.worldPos.z += a->GetHeight() + Settings::VerticalOffset;  // Configurable offset above head
-
-            // Calculate actual distance
+            d.worldPos.z += a->GetHeight() + Settings::VerticalOffset;
             d.distToPlayer = std::sqrt(distSq);
-
-            // Determine color scheme based on faction/hostility
             d.dispo = GetDisposition(a, player);
-            d.isPlayer = false;  // NPCs don't use tier effects
+            d.isPlayer = false;
 
-            // Occlusion check with caching to avoid checking every frame
             if (Settings::EnableOcclusionCulling)
-            {
-                auto cacheIt = s_cache.find(d.formID);
-                bool shouldCheck = true;
-
-                if (cacheIt != s_cache.end() && cacheIt->second.initialized)
-                {
-                    // Only use cached result if:
-                    // 1. Cache entry exists and is initialized
-                    // 2. We checked recently
-                    uint32_t framesSince = s_frame - cacheIt->second.lastOcclusionCheckFrame;
-                    if (framesSince < static_cast<uint32_t>(Settings::OcclusionCheckInterval))
-                    {
-                        d.isOccluded = cacheIt->second.cachedOccluded;
-                        shouldCheck = false;
-                    }
-                }
-
-                if (shouldCheck)
-                {
-                    // Use the nameplate world position for occlusion check
-                    // This is more accurate than actor's position
-                    d.isOccluded = Occlusion::IsActorOccluded(a, player, d.worldPos);
-                    // Update the cache with the fresh check result
-                    // Note: We update the cache here in the game thread, not in render thread
-                    if (cacheIt != s_cache.end())
-                    {
-                        cacheIt->second.lastOcclusionCheckFrame = s_frame;
-                        cacheIt->second.cachedOccluded = d.isOccluded;
-                    }
-                }
-            }
+                UpdateOcclusionForActor(d, a, player);
 
             tempBuf.push_back(std::move(d));
             ++added;
         }
 
-        // Atomically swap the snapshot with our new data
-        // This ensures the render thread sees a consistent state
         {
             std::lock_guard<std::mutex> lock(s_snapshotLock);
             s_snapshot = tempBuf;
@@ -1938,209 +1879,172 @@ namespace Renderer
         DebugOverlay::Render(ctx);
     }
 
-    void Draw()
+    /// Handle hot reload key press (Settings::ReloadKey).
+    static void HandleHotReload()
     {
-        // Hot reload key detection
-        if (Settings::ReloadKey > 0)
+        if (Settings::ReloadKey <= 0)
+            return;
+
+        bool keyDown = (GetAsyncKeyState(Settings::ReloadKey) & 0x8000) != 0;
+
+        if (keyDown && !s_reloadKeyWasDown)
         {
-            // Check if the reload key is currently pressed
-            bool keyDown = (GetAsyncKeyState(Settings::ReloadKey) & 0x8000) != 0;
+            Settings::Load();
+            s_lastReloadTime = static_cast<float>(ImGui::GetTime());
+            s_cache.clear();
 
-            // Trigger reload on key press
-            if (keyDown && !s_reloadKeyWasDown)
+            if (Settings::TemplateReapplyOnReload && Settings::UseTemplateAppearance)
             {
-                Settings::Load();
-                s_lastReloadTime = static_cast<float>(ImGui::GetTime());
-
-                // Reset caches to apply new settings immediately
-                s_cache.clear();
-
-                // Re-apply appearance template if configured
-                if (Settings::TemplateReapplyOnReload && Settings::UseTemplateAppearance)
-                {
-                    AppearanceTemplate::ResetAppliedFlag();
-                    SKSE::GetTaskInterface()->AddTask([]() {
-                        AppearanceTemplate::ApplyIfConfigured();
-                    });
-                }
+                AppearanceTemplate::ResetAppliedFlag();
+                SKSE::GetTaskInterface()->AddTask([]() {
+                    AppearanceTemplate::ApplyIfConfigured();
+                });
             }
-            s_reloadKeyWasDown = keyDown;
+        }
+        s_reloadKeyWasDown = keyDown;
+    }
+
+    /// Update debug stats from the current snapshot.
+    static void UpdateDebugStats(const std::vector<ActorDrawData>& snap)
+    {
+        s_debugStats.actorCount = static_cast<int>(snap.size());
+        s_debugStats.visibleActors = 0;
+        s_debugStats.occludedActors = 0;
+        s_debugStats.playerVisible = 0;
+
+        for (const auto &d : snap)
+        {
+            if (d.isPlayer)
+                s_debugStats.playerVisible = 1;
+            if (d.isOccluded)
+                s_debugStats.occludedActors++;
+            else
+                s_debugStats.visibleActors++;
+        }
+        ++s_updateCounter;
+    }
+
+    /// Resolve overlapping labels by pushing lower-priority ones down.
+    static void ResolveOverlaps(const std::vector<ActorDrawData>& localSnap)
+    {
+        struct LabelRect {
+            int idx;
+            float cy, halfH, dist, yOffset;
+            bool isPlayer;
+        };
+        std::vector<LabelRect> labelRects;
+
+        for (int i = 0; i < static_cast<int>(localSnap.size()); ++i)
+        {
+            const auto& d = localSnap[i];
+            auto cIt = s_cache.find(d.formID);
+            if (cIt == s_cache.end() || !cIt->second.initialized)
+                continue;
+
+            const auto& entry = cIt->second;
+            if (entry.alphaSmooth * entry.occlusionSmooth <= 0.02f)
+                continue;
+
+            float approxHeight = Settings::NameFontSize * entry.textSizeScale * 1.5f;
+            labelRects.push_back({i, entry.smooth.y, approxHeight * 0.5f,
+                                  d.distToPlayer, 0.0f, d.isPlayer});
         }
 
-        // Check if we're allowed to draw
+        // Sort by priority: player first, then closest first
+        std::sort(labelRects.begin(), labelRects.end(), [](const LabelRect& a, const LabelRect& b) {
+            if (a.isPlayer != b.isPlayer) return a.isPlayer > b.isPlayer;
+            return a.dist < b.dist;
+        });
+
+        // Iterative relaxation: push lower-priority labels down
+        float padding = Settings::Visual().OverlapPaddingY;
+        for (int pass = 0; pass < Settings::Visual().OverlapIterations; ++pass)
+        {
+            for (int i = 0; i < static_cast<int>(labelRects.size()); ++i)
+            {
+                for (int j = i + 1; j < static_cast<int>(labelRects.size()); ++j)
+                {
+                    float overlap = (labelRects[i].cy + labelRects[i].yOffset + labelRects[i].halfH + padding)
+                                  - (labelRects[j].cy + labelRects[j].yOffset - labelRects[j].halfH);
+                    if (overlap > 0.0f)
+                        labelRects[j].yOffset += overlap;
+                }
+            }
+        }
+
+        // Store offsets for DrawLabel to apply
+        for (const auto& lr : labelRects)
+        {
+            if (std::abs(lr.yOffset) > 0.01f)
+                OverlapOffsets()[localSnap[lr.idx].formID] = lr.yOffset;
+        }
+    }
+
+    void Draw()
+    {
+        HandleHotReload();
+
         if (!CanDrawOverlay())
         {
             s_wasInInvalidState = true;
             return;
         }
 
-        // If we just transitioned from invalid state, reset cooldown
         if (s_wasInInvalidState)
         {
             s_wasInInvalidState = false;
-            s_postLoadCooldown = 300;  // Wait ~5 seconds before rendering
+            s_postLoadCooldown = 300;
         }
 
-        // Don't render during post-load cooldown
-        // This prevents glitches during game load/fast travel transitions
         if (s_postLoadCooldown > 0)
         {
             --s_postLoadCooldown;
             return;
         }
 
-        // Queue an update of actor data
         QueueSnapshotUpdate_RenderThread();
 
-        // Get renderer for screen size
         auto *bsRenderer = RE::BSGraphics::Renderer::GetSingleton();
         if (!bsRenderer)
             return;
 
         const auto viewSize = bsRenderer->GetScreenSize();
-
-        // Increment frame counter
         ++s_frame;
 
-        // Copy snapshot data under lock
-        // Use static to avoid repeated allocations
         static std::vector<ActorDrawData> localSnap;
         {
             std::lock_guard<std::mutex> lock(s_snapshotLock);
             localSnap = s_snapshot;
         }
 
-        // Nothing to draw
         if (localSnap.empty())
             return;
 
-        // Create fullscreen overlay window
-        // Positioned at (0, 0) with size matching screen resolution
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2((float)viewSize.width, (float)viewSize.height));
         ImGui::Begin("whoisOverlay", nullptr,
-                     ImGuiWindowFlags_NoBackground |               // Transparent background
-                         ImGuiWindowFlags_NoDecoration |           // No title bar, borders, etc.
-                         ImGuiWindowFlags_NoInputs |               // Don't capture mouse/keyboard
-                         ImGuiWindowFlags_NoSavedSettings |        // Don't save window state
-                         ImGuiWindowFlags_NoFocusOnAppearing |     // Don't steal focus
-                         ImGuiWindowFlags_NoBringToFrontOnFocus);  // Don't reorder windows
+                     ImGuiWindowFlags_NoBackground |
+                         ImGuiWindowFlags_NoDecoration |
+                         ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoFocusOnAppearing |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        // Get draw list for custom rendering
         ImDrawList *drawList = ImGui::GetWindowDrawList();
 
-        // Update debug stats before drawing
         if (Settings::EnableDebugOverlay)
-        {
-            s_debugStats.actorCount = static_cast<int>(localSnap.size());
-            s_debugStats.visibleActors = 0;
-            s_debugStats.occludedActors = 0;
-            s_debugStats.playerVisible = 0;
+            UpdateDebugStats(localSnap);
 
-            for (const auto &d : localSnap)
-            {
-                if (d.isPlayer)
-                {
-                    s_debugStats.playerVisible = 1;
-                }
-                if (d.isOccluded)
-                {
-                    s_debugStats.occludedActors++;
-                }
-                else
-                {
-                    s_debugStats.visibleActors++;
-                }
-            }
-            ++s_updateCounter;
-        }
-
-        // Overlap prevention: resolve overlapping labels before drawing
         OverlapOffsets().clear();
         if (Settings::Visual().EnableOverlapPrevention)
-        {
-            struct LabelRect {
-                int idx;
-                float cy;       // screen Y center from cache
-                float halfH;    // approximate half-height
-                float dist;     // distance for priority
-                float yOffset;  // computed push offset
-                bool isPlayer;
-            };
-            std::vector<LabelRect> labelRects;
+            ResolveOverlaps(localSnap);
 
-            for (int i = 0; i < static_cast<int>(localSnap.size()); ++i)
-            {
-                const auto& d = localSnap[i];
-                auto cIt = s_cache.find(d.formID);
-                if (cIt == s_cache.end() || !cIt->second.initialized)
-                    continue;
-
-                const auto& entry = cIt->second;
-                if (entry.alphaSmooth * entry.occlusionSmooth <= 0.02f)
-                    continue;
-
-                float scale = entry.textSizeScale;
-                float approxHeight = Settings::NameFontSize * scale * 1.5f;
-
-                LabelRect lr;
-                lr.idx = i;
-                lr.cy = entry.smooth.y;
-                lr.halfH = approxHeight * 0.5f;
-                lr.dist = d.distToPlayer;
-                lr.yOffset = 0.0f;
-                lr.isPlayer = d.isPlayer;
-                labelRects.push_back(lr);
-            }
-
-            // Sort by priority: player first, then closest first
-            std::sort(labelRects.begin(), labelRects.end(), [](const LabelRect& a, const LabelRect& b) {
-                if (a.isPlayer != b.isPlayer) return a.isPlayer > b.isPlayer;
-                return a.dist < b.dist;
-            });
-
-            // Iterative relaxation: push lower-priority labels down
-            float padding = Settings::Visual().OverlapPaddingY;
-            for (int pass = 0; pass < Settings::Visual().OverlapIterations; ++pass)
-            {
-                for (int i = 0; i < static_cast<int>(labelRects.size()); ++i)
-                {
-                    for (int j = i + 1; j < static_cast<int>(labelRects.size()); ++j)
-                    {
-                        float botI = labelRects[i].cy + labelRects[i].yOffset + labelRects[i].halfH;
-                        float topJ = labelRects[j].cy + labelRects[j].yOffset - labelRects[j].halfH;
-
-                        float overlap = (botI + padding) - topJ;
-                        if (overlap > 0.0f)
-                        {
-                            labelRects[j].yOffset += overlap;
-                        }
-                    }
-                }
-            }
-
-            // Store offsets for DrawLabel to apply
-            for (const auto& lr : labelRects)
-            {
-                if (std::abs(lr.yOffset) > 0.01f)
-                {
-                    OverlapOffsets()[localSnap[lr.idx].formID] = lr.yOffset;
-                }
-            }
-        }
-
-        // Draw a label for each actor in the snapshot
         for (auto &d : localSnap)
-        {
             DrawLabel(d, drawList);
-        }
 
         ImGui::End();
 
-        // Draw debug overlay
         DrawDebugOverlay();
-
-        // Clean up cache entries for actors no longer in snapshot
         PruneCacheToSnapshot(localSnap);
     }
 
