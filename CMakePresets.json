@@ -5,6 +5,7 @@
       "name": "windows-base",
       "hidden": true,
       "generator": "Visual Studio 17 2022",
+      "toolset": "v143,version=14.44",
       "binaryDir": "${sourceDir}/build",
       "architecture": {
         "value": "x64",
@@ -14,7 +15,8 @@
       "cacheVariables": {
         "CMAKE_CXX_STANDARD": "23",
         "VCPKG_TARGET_TRIPLET": "x64-windows-static",
-        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>",
+        "CMAKE_VS_GLOBALS": "VCToolsVersion=14.44.35207"
       }
     },
     {
