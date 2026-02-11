@@ -17,8 +17,12 @@ echo                            WHOIS DEPLOY SCRIPT
 echo ============================================================================
 echo.
 
-:: MO2 overwrite folder path
-set "DEPLOY_PATH=D:\Nolvus\Instance\MODS\overwrite"
+:: MO2 overwrite folder path (override with WHOIS_DEPLOY_PATH env var)
+if defined WHOIS_DEPLOY_PATH (
+    set "DEPLOY_PATH=%WHOIS_DEPLOY_PATH%"
+) else (
+    set "DEPLOY_PATH=D:\Nolvus\Instance\MODS\overwrite"
+)
 
 REM ============================================================================
 REM STEP 1: Verify Build

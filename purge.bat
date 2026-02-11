@@ -15,8 +15,12 @@ echo                            WHOIS PURGE SCRIPT
 echo ============================================================================
 echo.
 
-:: MO2 overwrite folder path (same as deploy.bat)
-set "DEPLOY_PATH=D:\Nolvus\Instance\MODS\overwrite"
+:: MO2 overwrite folder path (override with WHOIS_DEPLOY_PATH env var)
+if defined WHOIS_DEPLOY_PATH (
+    set "DEPLOY_PATH=%WHOIS_DEPLOY_PATH%"
+) else (
+    set "DEPLOY_PATH=D:\Nolvus\Instance\MODS\overwrite"
+)
 
 echo Target: %DEPLOY_PATH%
 echo.
