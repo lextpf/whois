@@ -147,37 +147,6 @@
       "https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.0/dist/mermaid-layout-elk.esm.min.mjs";
     mermaid.registerLayoutLoaders(elkLayouts);
 
-    // Remove @author entries from documentation
-    function removeAuthorEntries()
-    {
-      // Doxide renders @author as plain <p> text
-      document.querySelectorAll('p').forEach(p =>
-      {
-        if (p.textContent.trim().startsWith('@author'))
-        {
-          p.remove();
-        }
-      });
-      // In <tr> with "Author" heading
-      document.querySelectorAll('tr').forEach(tr =>
-      {
-        if (tr.textContent.includes('Author') && tr.querySelector('td'))
-        {
-          tr.remove();
-        }
-      });
-      document.querySelectorAll('dt').forEach(dt =>
-      {
-        if (dt.textContent.trim() === 'Author')
-        {
-          const dd = dt.nextElementSibling;
-          if (dd && dd.tagName === 'DD') dd.remove();
-          dt.remove();
-        }
-      });
-    }
-    removeAuthorEntries();
-
     mermaid.initialize(
     {
       startOnLoad: false,
