@@ -27,7 +27,7 @@ An SKSE plugin that renders **floating nameplates** above NPCs and creatures, di
 <div align="center">
 <br>
 
-![Plugin](./PREVIEW.png)
+![Plugin](./PREVIEW-NEW.png)
 
 </div>
 
