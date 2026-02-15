@@ -313,6 +313,7 @@ namespace Settings
     // Display Options
     extern float VerticalOffset;         ///< Height above actor's head in units (default: 8.0)
     extern bool  HidePlayer;             ///< Hide player's own nameplate (default: false)
+    extern bool  HideCreatures;          ///< Hide nameplates for non-NPC actors (default: false)
     extern int   ReloadKey;              ///< Virtual key code for hot reload (default: 0 = disabled)
 
     // Animation Speed

@@ -1506,13 +1506,9 @@ namespace TextEffects
         int texCount = useTextures ? ParticleTextures::GetTextureCount(texStyleId) : 0;
         bool hasTextures = (texCount > 0);
 
-        // Moderate alpha for visible but not overwhelming particles
-        const float globalAlphaMult = 0.75f;
-        alpha *= globalAlphaMult;
-
-        // Reduce alpha when multiple styles overlap to prevent brightness pileup
+        // Gentle reduction when multiple styles overlap to prevent brightness pileup
         if (enabledStyleCount > 1)
-            alpha /= std::sqrt((float)enabledStyleCount);
+            alpha /= (1.0f + 0.15f * (enabledStyleCount - 1));
 
         int baseR = (color >> 0) & 0xFF;
         int baseG = (color >> 8) & 0xFF;
@@ -1522,11 +1518,25 @@ namespace TextEffects
 
         for (int i = 0; i < particleCount; ++i)
         {
-            float phase = (float)i / (float)particleCount * TWO_PI + styleIndex * 2.399963f;
+            // Use golden angle spacing with per-particle hash jitter to break regularity
             float golden = (float)(i + styleIndex * 97) * 2.399963f;  // Golden angle, offset per style
+            float hashJitter = std::fmod((float)(i * 7 + styleIndex * 13) * 0.6180339887f, 1.0f);
+            float phase = golden + hashJitter * 1.2f;  // Irregular angular distribution
 
-            // Per-particle alpha variation (0.4 to 1.0 range)
-            float alphaVariation = 0.4f + 0.6f * (0.5f + 0.5f * std::sin(golden * 1.7f + timeScaled * 0.3f));
+            // Spread styles into radial bands to avoid center clumping when many styles overlap.
+            float styleBandT = (enabledStyleCount > 0)
+                ? (static_cast<float>(styleIndex) + 0.5f) / static_cast<float>(enabledStyleCount)
+                : 0.5f;
+            float minRadius = std::clamp(0.58f + 0.20f * styleBandT, 0.58f, 0.88f);
+            float radialSeed = std::fmod(static_cast<float>(i) * 0.6180339887f + styleBandT * 0.31f, 1.0f);
+            float radialAnchor = std::sqrt(radialSeed);
+
+            // Per-particle position jitter to break circular orbit patterns
+            float jitterAngle = std::fmod((float)(i * 17 + styleIndex * 31) * 0.3819660113f, 1.0f) * TWO_PI;
+            float jitterDist = std::fmod((float)(i * 23 + styleIndex * 7) * 0.6180339887f, 1.0f) * 0.25f;
+
+            // Per-particle alpha variation (0.6 to 1.0 range)
+            float alphaVariation = 0.6f + 0.4f * (0.5f + 0.5f * std::sin(golden * 1.7f + timeScaled * 0.3f));
 
             // Per-particle color variation - more vibrant hue shift and boosted saturation
             float hueShift = std::sin(golden * 2.3f + timeScaled * 0.25f) * 0.4f;  // +/- 40% hue shift for rainbow variety
@@ -1564,22 +1574,23 @@ namespace TextEffects
                 case Settings::ParticleStyle::Stars:
                 default:
                 {
-                    // Twinkling blue stars - dark to bright blue colors
+                    // Twinkling stars
                     float orbit = phase + timeScaled * 0.5f;
-                    float radiusMod = 0.6f + 0.4f * std::sin(golden);
-                    x = center.x + std::cos(orbit) * radiusX * radiusMod;
-                    y = center.y + std::sin(orbit) * radiusY * radiusMod;
+                    float radiusWave = 0.5f + 0.5f * std::sin(golden);
+                    float radiusMod = minRadius + (1.0f - minRadius) * (0.72f * radialAnchor + 0.28f * radiusWave);
+                    x = center.x + std::cos(orbit) * radiusX * radiusMod + std::cos(jitterAngle) * radiusX * jitterDist;
+                    y = center.y + std::sin(orbit) * radiusY * radiusMod + std::sin(jitterAngle) * radiusY * jitterDist;
 
                     // Multi-frequency twinkle for more natural look
                     float twinkle1 = std::sin(timeScaled * 3.0f + golden * 3.0f);
                     float twinkle2 = std::sin(timeScaled * 5.0f + golden * 2.0f) * 0.3f;
                     float twinkle = 0.5f + 0.5f * (twinkle1 + twinkle2) / 1.3f;
 
-                    if (twinkle < 0.2f)
+                    if (twinkle < 0.1f)
                         continue;
 
-                    finalAlpha = alpha * twinkle * alphaVariation;
-                    finalSize = particleSize * (0.5f + 0.7f * twinkle);
+                    finalAlpha = alpha * (0.3f + 0.7f * twinkle) * alphaVariation;
+                    finalSize = particleSize;
 
                     int a = std::clamp((int)(finalAlpha * 255.0f), 0, 255);
                     int glowA = std::clamp((int)(finalAlpha * 60.0f), 0, 255);
@@ -1597,8 +1608,16 @@ namespace TextEffects
                     // Use textured sprite if available
                     if (hasTextures)
                     {
-                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 16.0f,
-                                                            texStyleId, i, IM_COL32(sr, sg, sb, a), rotation);
+                        // Faint afterimage at previous rotation for motion feel
+                        float prevRotation = rotation - 0.15f;
+                        int trailA = std::clamp(static_cast<int>(a * 0.25f), 0, 255);
+                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 6.0f,
+                                                            texStyleId, i, IM_COL32(255, 255, 255, trailA),
+                                                            ParticleTextures::BlendMode::Alpha, prevRotation);
+                        // Crisp core sprite — original texture colors
+                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 6.0f,
+                                                            texStyleId, i, IM_COL32(255, 255, 255, a),
+                                                            ParticleTextures::BlendMode::Alpha, rotation);
                     }
                     else
                     {
@@ -1633,12 +1652,13 @@ namespace TextEffects
                     float life = sparkPhase / TWO_PI;
 
                     // Sparks shoot outward with slight curve
-                    float dist = 0.2f + life * 0.8f;
+                    float sparkMinDist = std::clamp(minRadius - 0.05f, 0.52f, 0.85f);
+                    float dist = sparkMinDist + life * (1.0f - sparkMinDist);
                     float baseAngle = phase + std::sin(golden * 2.0f) * 0.5f;
                     float curveAngle = baseAngle + life * 0.3f * std::sin(golden);
 
-                    x = center.x + std::cos(curveAngle) * radiusX * dist;
-                    y = center.y + std::sin(curveAngle) * radiusY * dist - life * radiusY * 0.4f;
+                    x = center.x + std::cos(curveAngle) * radiusX * dist + std::cos(jitterAngle) * radiusX * jitterDist * 0.5f;
+                    y = center.y + std::sin(curveAngle) * radiusY * dist - life * radiusY * 0.4f + std::sin(jitterAngle) * radiusY * jitterDist * 0.5f;
 
                     // Fade out with life, but also flicker
                     float flicker = 0.8f + 0.2f * std::sin(timeScaled * 15.0f + golden * 5.0f);
@@ -1646,7 +1666,7 @@ namespace TextEffects
                     if (finalAlpha < 0.05f)
                         continue;
 
-                    finalSize = particleSize * (1.0f - life * 0.4f);
+                    finalSize = particleSize;
 
                     int a = std::clamp((int)(finalAlpha * 255.0f), 0, 255);
 
@@ -1659,8 +1679,24 @@ namespace TextEffects
                     // Use textured sprite if available
                     if (hasTextures)
                     {
-                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 16.0f,
-                                                            texStyleId, i, IM_COL32(sr, sg, sb, a), curveAngle);
+                        // Ember trail ghosts — 2 fading crisp echoes behind movement
+                        float trailDx = -std::cos(curveAngle);
+                        float trailDy = -std::sin(curveAngle);
+                        float trailSpacing = finalSize * 3.6f;
+                        for (int t = 2; t >= 1; --t)
+                        {
+                            float tf = static_cast<float>(t) / 3.0f;
+                            float tx = x + trailDx * trailSpacing * tf;
+                            float ty = y + trailDy * trailSpacing * tf;
+                            int trailA = std::clamp(static_cast<int>(a * (0.3f - 0.1f * t)), 0, 255);
+                            ParticleTextures::DrawSpriteWithIndex(list, ImVec2(tx, ty), finalSize * 6.0f,
+                                                                texStyleId, i, IM_COL32(255, 255, 255, trailA),
+                                                                ParticleTextures::BlendMode::Alpha, curveAngle);
+                        }
+                        // Crisp core sprite — original texture colors
+                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 6.0f,
+                                                            texStyleId, i, IM_COL32(255, 255, 255, a),
+                                                            ParticleTextures::BlendMode::Alpha, curveAngle);
                     }
                     else
                     {
@@ -1677,14 +1713,15 @@ namespace TextEffects
                     float wave2 = std::sin(wispTime * 1.7f + golden * 1.3f) * 0.15f;
                     float orbit = phase + wispTime + wave1 + wave2;
 
-                    float radiusMod = 0.4f + 0.6f * std::sin(golden + wispTime * 0.5f);
-                    x = center.x + std::cos(orbit) * radiusX * radiusMod;
-                    y = center.y + std::sin(orbit * 0.7f) * radiusY * radiusMod;
+                    float radiusWave = 0.5f + 0.5f * std::sin(golden + wispTime * 0.5f);
+                    float radiusMod = minRadius + (1.0f - minRadius) * (0.78f * radialAnchor + 0.22f * radiusWave);
+                    x = center.x + std::cos(orbit) * radiusX * radiusMod + std::cos(jitterAngle) * radiusX * jitterDist;
+                    y = center.y + std::sin(orbit * 0.7f) * radiusY * radiusMod + std::sin(jitterAngle) * radiusY * jitterDist;
 
-                    // Gentle pulsing (alpha only, not size - keep pixel art consistent)
+                    // Gentle pulsing (alpha only, not size - keep sprite consistent)
                     float pulse = 0.6f + 0.4f * std::sin(wispTime * 2.0f + golden * 2.0f);
-                    finalAlpha = alpha * pulse * 0.7f * alphaVariation;
-                    finalSize = particleSize; // Constant size for crisp pixel art
+                    finalAlpha = alpha * pulse * alphaVariation;
+                    finalSize = particleSize; // Constant size for clean edges
 
                     int a = std::clamp((int)(finalAlpha * 255.0f), 0, 255);
 
@@ -1700,8 +1737,18 @@ namespace TextEffects
                     // Use textured sprite if available
                     if (hasTextures)
                     {
-                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 16.0f,
-                                                            texStyleId, i, IM_COL32(wr, wg, wb, a), moveAngle);
+                        // Trailing echo — faint crisp sprite behind movement
+                        float echoDist = finalSize * 5.0f;
+                        float ex = x - std::cos(moveAngle) * echoDist;
+                        float ey = y - std::sin(moveAngle) * echoDist;
+                        int echoA = std::clamp(static_cast<int>(a * 0.3f), 0, 255);
+                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(ex, ey), finalSize * 5.0f,
+                                                            texStyleId, i, IM_COL32(255, 255, 255, echoA),
+                                                            ParticleTextures::BlendMode::Alpha, moveAngle);
+                        // Crisp core sprite — original texture colors
+                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 6.0f,
+                                                            texStyleId, i, IM_COL32(255, 255, 255, a),
+                                                            ParticleTextures::BlendMode::Alpha, moveAngle);
                     }
                     else
                     {
@@ -1717,17 +1764,34 @@ namespace TextEffects
                     float wobble = std::sin(timeScaled + golden) * 0.1f;
                     float floatY = std::sin(timeScaled * 1.5f + golden * 2.0f) * radiusY * 0.08f;
 
-                    x = center.x + std::cos(runeOrbit + wobble) * radiusX * 0.75f;
-                    y = center.y + std::sin(runeOrbit + wobble) * radiusY * 0.45f + floatY;
+                    x = center.x + std::cos(runeOrbit + wobble) * radiusX * 0.9f + std::cos(jitterAngle) * radiusX * jitterDist;
+                    y = center.y + std::sin(runeOrbit + wobble) * radiusY * 0.65f + floatY + std::sin(jitterAngle) * radiusY * jitterDist;
 
                     // Pulsing glow
                     float pulse = 0.7f + 0.3f * std::sin(timeScaled * 2.0f + golden);
                     finalAlpha = alpha * pulse * alphaVariation;
-                    finalSize = particleSize * 1.5f;
+                    finalSize = particleSize;
 
                     int a = std::clamp((int)(finalAlpha * 255.0f), 0, 255);
 
-                    DrawRune(list, ImVec2(x, y), finalSize, r, g, b, a, i);
+                    // Use textured rune sprites when available; fallback to procedural runes.
+                    if (hasTextures)
+                    {
+                        // Periodic mystical surge — staggered per particle (~3s cycle)
+                        float surgeCycle = std::sin(timeScaled * 0.35f + golden * 2.5f);
+                        float surgeT = std::clamp((surgeCycle - 0.7f) / 0.3f, 0.0f, 1.0f);  // Active top 30%
+                        int surgedA = std::clamp(static_cast<int>(a * (1.0f + 0.4f * surgeT)), 0, 255);
+                        float surgedSize = finalSize;
+
+                        // Crisp core sprite with surge intensity — original texture colors
+                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), surgedSize * 6.0f,
+                                                            texStyleId, i, IM_COL32(255, 255, 255, surgedA),
+                                                            ParticleTextures::BlendMode::Alpha, runeOrbit + wobble);
+                    }
+                    else
+                    {
+                        DrawRune(list, ImVec2(x, y), finalSize, r, g, b, a, i);
+                    }
                     break;
                 }
 
@@ -1741,22 +1805,25 @@ namespace TextEffects
                     float breathe = 0.85f + 0.15f * std::sin(orbTime * 1.5f + golden);
                     float floatY = std::sin(orbTime * 2.0f + golden * 1.5f) * radiusY * 0.1f;
 
-                    float radiusMod = (0.45f + 0.45f * std::sin(golden)) * breathe;
-                    x = center.x + std::cos(orbit) * radiusX * radiusMod;
-                    y = center.y + std::sin(orbit * 0.8f) * radiusY * radiusMod + floatY;
+                    float radiusWave = 0.5f + 0.5f * std::sin(golden);
+                    float radiusMod = (minRadius + (1.0f - minRadius) * (0.74f * radialAnchor + 0.26f * radiusWave)) * breathe;
+                    x = center.x + std::cos(orbit) * radiusX * radiusMod + std::cos(jitterAngle) * radiusX * jitterDist;
+                    y = center.y + std::sin(orbit * 0.8f) * radiusY * radiusMod + floatY + std::sin(jitterAngle) * radiusY * jitterDist;
 
-                    // Gentle pulsing glow (alpha only, not size - keep pixel art consistent)
-                    float glow = 0.65f + 0.35f * std::sin(orbTime * 2.0f + golden * 2.0f);
-                    finalAlpha = alpha * glow * 0.6f * alphaVariation;
-                    finalSize = particleSize; // Constant size for crisp pixel art
+                    // Stronger breathing pulse for clearer visual rhythm
+                    float glow = 0.5f + 0.5f * std::sin(orbTime * 2.0f + golden * 2.0f);
+                    finalAlpha = alpha * glow * alphaVariation;
+                    finalSize = particleSize; // Constant size for clean edges
 
                     int a = std::clamp((int)(finalAlpha * 255.0f), 0, 255);
 
                     // Use textured sprite if available
                     if (hasTextures)
                     {
-                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 16.0f,
-                                                            texStyleId, i, IM_COL32(r, g, b, a), 0.0f);
+                        // Crisp core sprite — original texture colors
+                        ParticleTextures::DrawSpriteWithIndex(list, ImVec2(x, y), finalSize * 6.0f,
+                                                            texStyleId, i, IM_COL32(255, 255, 255, a),
+                                                            ParticleTextures::BlendMode::Alpha, 0.0f);
                     }
                     else
                     {

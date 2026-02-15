@@ -605,6 +605,37 @@ namespace Renderer
             if (!a || a == player || a->IsDead())
                 continue;
 
+            // Skip creatures/animals if HideCreatures is enabled.
+            // Prefer ActorTypeNPC on actor, then base, then race for robustness across mods.
+            if (Settings::HideCreatures)
+            {
+                static RE::BGSKeyword *npcKeyword = nullptr;
+                if (!npcKeyword)
+                {
+                    if (auto* dataHandler = RE::TESDataHandler::GetSingleton(); dataHandler) {
+                        npcKeyword = dataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
+                    }
+                }
+
+                bool isHumanoidNPC = false;
+                if (npcKeyword) {
+                    isHumanoidNPC = a->HasKeyword(npcKeyword);
+                    if (!isHumanoidNPC) {
+                        if (auto* actorBase = a->GetActorBase(); actorBase) {
+                            isHumanoidNPC = actorBase->HasKeyword(npcKeyword);
+                            if (!isHumanoidNPC) {
+                                if (auto* race = actorBase->GetRace(); race) {
+                                    isHumanoidNPC = race->HasKeyword(npcKeyword);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (npcKeyword && !isHumanoidNPC)
+                    continue;
+            }
+
             const float distSq = playerPos.GetSquaredDistance(a->GetPosition());
             if (distSq > kMaxDistSq)
                 continue;
@@ -1225,9 +1256,11 @@ namespace Renderer
         // Highlight color for shimmer/special effects
         ImU32 highlight = ImGui::ColorConvertFloat4ToU32(ImVec4(tier.highlightColor[0], tier.highlightColor[1], tier.highlightColor[2], effectAlpha));
 
-        // Outline and shadow colors
-        ImU32 outlineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 1));
-        ImU32 shadowColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 1));
+        // Keep black layers tied to distance alpha so far text fades instead of turning black.
+        const float outlineAlpha = TextEffects::Saturate(alpha);
+        const float shadowAlpha = TextEffects::Saturate(alpha * 0.75f);
+        ImU32 outlineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, outlineAlpha));
+        ImU32 shadowColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, shadowAlpha));
 
         // Base outline width from settings
         const float baseOutlineWidth = Settings::OutlineWidthMin + Settings::OutlineWidthMax;
@@ -1544,7 +1577,10 @@ namespace Renderer
 
         // Draw particles first so they appear behind everything else
         bool tierHasParticles = !tier.particleTypes.empty() && tier.particleTypes != "None";
-        bool showParticles = ((d.isPlayer && Settings::EnableParticleAura && tierHasParticles && tierAllowsParticles)
+        bool globalHasParticles = Settings::EnableOrbs || Settings::EnableWisps || Settings::EnableRunes ||
+                                  Settings::EnableSparks || Settings::EnableStars;
+        bool hasAnyParticles = tierHasParticles || globalHasParticles;
+        bool showParticles = ((Settings::EnableParticleAura && hasAnyParticles && tierAllowsParticles)
                           || (specialTitle && specialTitle->forceParticles))
                           && lodEffectsFactor > 0.01f;
         if (showParticles)
@@ -1560,11 +1596,24 @@ namespace Renderer
             }
 
             // Particle spread based on nameplate size
-            float spreadX = (nameplateWidth * 0.5f + Settings::ParticleSpread);
-            float spreadY = (nameplateHeight * 0.5f + Settings::ParticleSpread * 0.6f);
+            float spreadX = (nameplateWidth * 0.5f + Settings::ParticleSpread * 1.4f);
+            float spreadY = (nameplateHeight * 0.5f + Settings::ParticleSpread * 1.1f);
 
-            // Use tier-specific particle count if set, otherwise global
+            // Use tier-specific particle count if set, otherwise global.
+            // Boost high-tier/high-level visibility so very high levels read as visually stronger.
             int particleCount = (tier.particleCount > 0) ? tier.particleCount : Settings::ParticleCount;
+            float tierBoost = 0.0f;
+            if (Settings::Tiers.size() > 1) {
+                tierBoost = static_cast<float>(tierIdx) / static_cast<float>(Settings::Tiers.size() - 1);
+            }
+            float levelBoost = TextEffects::Saturate((static_cast<float>(lv) - 100.0f) / 400.0f);
+            float particleBoost = 1.0f + 0.6f * tierBoost + 0.6f * levelBoost;
+            int boostedParticleCount = std::clamp(static_cast<int>(std::round(particleCount * particleBoost)),
+                                                  particleCount, 96);
+            float boostedParticleSize = Settings::ParticleSize * (1.0f + 0.4f * tierBoost + 0.35f * levelBoost);
+            float boostedParticleAlpha = std::clamp(Settings::ParticleAlpha * alpha *
+                                                    (0.95f + 0.35f * tierBoost + 0.35f * levelBoost),
+                                                    0.0f, 1.0f);
 
             // Determine which particle types to render
             // If tier has specific types, use those; otherwise use global settings
@@ -1594,41 +1643,41 @@ namespace Renderer
             if (showOrbs)
             {
                 TextEffects::DrawParticleAura(drawList, nameplateCenter, spreadX, spreadY,
-                                              particleColor, Settings::ParticleAlpha * alpha * 0.7f,
-                                              Settings::ParticleStyle::Orbs, particleCount,
-                                              Settings::ParticleSize, Settings::ParticleSpeed, time,
+                                              particleColor, boostedParticleAlpha,
+                                              Settings::ParticleStyle::Orbs, boostedParticleCount,
+                                              boostedParticleSize, Settings::ParticleSpeed, time,
                                               slot++, enabledStyles);
             }
             if (showWisps)
             {
-                TextEffects::DrawParticleAura(drawList, nameplateCenter, spreadX * 1.1f, spreadY * 1.1f,
-                                              particleColor, Settings::ParticleAlpha * alpha * 0.8f,
-                                              Settings::ParticleStyle::Wisps, particleCount,
-                                              Settings::ParticleSize, Settings::ParticleSpeed, time,
+                TextEffects::DrawParticleAura(drawList, nameplateCenter, spreadX * 1.15f, spreadY * 1.15f,
+                                              particleColor, boostedParticleAlpha,
+                                              Settings::ParticleStyle::Wisps, boostedParticleCount,
+                                              boostedParticleSize, Settings::ParticleSpeed, time,
                                               slot++, enabledStyles);
             }
             if (showRunes)
             {
                 TextEffects::DrawParticleAura(drawList, nameplateCenter, spreadX * 0.9f, spreadY * 0.7f,
-                                              particleColor, Settings::ParticleAlpha * alpha,
-                                              Settings::ParticleStyle::Runes, std::max(4, particleCount / 2),
-                                              Settings::ParticleSize * 1.2f, Settings::ParticleSpeed * 0.6f, time,
+                                              particleColor, boostedParticleAlpha,
+                                              Settings::ParticleStyle::Runes, std::max(4, boostedParticleCount / 2),
+                                              boostedParticleSize * 1.2f, Settings::ParticleSpeed * 0.6f, time,
                                               slot++, enabledStyles);
             }
             if (showSparks)
             {
                 TextEffects::DrawParticleAura(drawList, nameplateCenter, spreadX, spreadY * 0.8f,
-                                              particleColor, Settings::ParticleAlpha * alpha,
-                                              Settings::ParticleStyle::Sparks, particleCount,
-                                              Settings::ParticleSize * 0.7f, Settings::ParticleSpeed * 1.5f, time,
+                                              particleColor, boostedParticleAlpha,
+                                              Settings::ParticleStyle::Sparks, boostedParticleCount,
+                                              boostedParticleSize * 0.7f, Settings::ParticleSpeed * 1.5f, time,
                                               slot++, enabledStyles);
             }
             if (showStars)
             {
                 TextEffects::DrawParticleAura(drawList, nameplateCenter, spreadX, spreadY,
-                                              particleColor, Settings::ParticleAlpha * alpha,
-                                              Settings::ParticleStyle::Stars, particleCount,
-                                              Settings::ParticleSize, Settings::ParticleSpeed, time,
+                                              particleColor, boostedParticleAlpha,
+                                              Settings::ParticleStyle::Stars, boostedParticleCount,
+                                              boostedParticleSize, Settings::ParticleSpeed, time,
                                               slot++, enabledStyles);
             }
         }
@@ -1646,17 +1695,57 @@ namespace Renderer
         ImFont* ornamentFont = (ornIo.Fonts->Fonts.Size >= 4) ? ornIo.Fonts->Fonts[3] : nullptr;
         if (showOrnaments && !Settings::OrnamentFontPath.empty() && ornamentFont)
         {
+            // Keep only valid UTF-8 ornaments with an actual glyph in the ornament font.
+            auto collectDrawableOrnaments = [&](const std::string& raw) {
+                std::vector<std::string> out;
+                const char* p = raw.c_str();
+                while (*p) {
+                    unsigned int cp = 0;
+                    const char* next = Utf8Next(p, cp);
+                    if (!next || next <= p) {
+                        ++p;
+                        continue;
+                    }
+
+                    // Skip invalid and control codepoints to avoid tofu blocks.
+                    if (cp == 0xFFFD || cp < 0x20) {
+                        p = next;
+                        continue;
+                    }
+
+                    const ImFontGlyph* glyph = nullptr;
+#if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 18804
+                    glyph = ornamentFont->FindGlyphNoFallback(static_cast<ImWchar>(cp));
+#else
+                    glyph = ornamentFont->FindGlyph(static_cast<ImWchar>(cp));
+#endif
+                    if (glyph) {
+                        out.emplace_back(p, static_cast<size_t>(next - p));
+                    }
+
+                    p = next;
+                }
+                return out;
+            };
+
+            const auto leftChars = collectDrawableOrnaments(leftOrns);
+            const auto rightChars = collectDrawableOrnaments(rightOrns);
+            if (leftChars.empty() && rightChars.empty()) {
+                // All configured ornaments were invalid or missing from font.
+                // Skip drawing instead of rendering fallback block glyphs.
+            } else {
             // Calculate ornament scale based on tier position
             float ornamentScale = 0.75f;
             if (Settings::Tiers.size() > 1) {
-                ornamentScale = 0.75f + 0.5f * (static_cast<float>(tierIdx) / static_cast<float>(Settings::Tiers.size() - 1));
+                ornamentScale = 0.75f + 0.3f * (static_cast<float>(tierIdx) / static_cast<float>(Settings::Tiers.size() - 1));
             }
             float sizeMultiplier = (specialTitle != nullptr) ? ornamentScale * 1.3f : ornamentScale;
-            float ornamentSize = Settings::OrnamentFontSize * Settings::OrnamentScale * sizeMultiplier;
+            float ornamentSize = Settings::OrnamentFontSize * Settings::OrnamentScale * sizeMultiplier * textSizeScale;
 
             // Extra padding between ornaments and text
-            float extraPadding = ornamentSize * 0.15f;
-            float totalSpacing = Settings::OrnamentSpacing + extraPadding;
+            float extraPadding = ornamentSize * 0.30f;
+            float totalSpacing = Settings::OrnamentSpacing * 1.35f + extraPadding;
+            float ornamentCharGap = std::max(2.0f, ornamentSize * 0.16f);
 
             // Use same colors as name for ornaments
             ImU32 ornColL = ImGui::ColorConvertFloat4ToU32(ImVec4(Lc.x, Lc.y, Lc.z, alpha));
@@ -1685,9 +1774,8 @@ namespace Renderer
             };
 
             // Use UTF-8 aware iteration for multi-byte characters
-            if (!leftOrns.empty())
+            if (!leftChars.empty())
             {
-                auto leftChars = Utf8ToChars(leftOrns);
                 float cursorX = nameplateCenter.x - nameplateWidth * 0.5f - totalSpacing;
                 // Draw characters in reverse order
                 for (int i = static_cast<int>(leftChars.size()) - 1; i >= 0; --i)
@@ -1697,12 +1785,14 @@ namespace Renderer
                     cursorX -= charSize.x;
                     ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
                     drawOrnChar(charPos, ch.c_str());
+                    if (i > 0) {
+                        cursorX -= ornamentCharGap;
+                    }
                 }
             }
 
-            if (!rightOrns.empty())
+            if (!rightChars.empty())
             {
-                auto rightChars = Utf8ToChars(rightOrns);
                 float cursorX = nameplateCenter.x + nameplateWidth * 0.5f + totalSpacing;
                 for (size_t i = 0; i < rightChars.size(); ++i)
                 {
@@ -1711,7 +1801,11 @@ namespace Renderer
                     ImVec2 charPos(cursorX, nameplateCenter.y - charSize.y * 0.5f);
                     drawOrnChar(charPos, ch.c_str());
                     cursorX += charSize.x;
+                    if (i + 1 < rightChars.size()) {
+                        cursorX += ornamentCharGap;
+                    }
                 }
+            }
             }
         }
 
@@ -1761,7 +1855,9 @@ namespace Renderer
             else
             {
                 // NPC, use disposition color with simple outline
-                ImU32 dCol = ImGui::ColorConvertFloat4ToU32(WashColor(dispoCol));
+                ImVec4 dColV = WashColor(dispoCol);
+                dColV.w = lodTitleAlphaFinal;
+                ImU32 dCol = ImGui::ColorConvertFloat4ToU32(dColV);
                 ImU32 npcOutline = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, lodTitleAlphaFinal));
                 TextEffects::AddTextOutline4(drawList, fontTitle, titleFontSize, titlePos, titleDisplayText, dCol, npcOutline, titleOutlineWidth);
             }
@@ -1838,7 +1934,9 @@ namespace Renderer
                 else
                 {
                     // NPC, simple outline with disposition color (enemy=red, friend=blue, etc.)
-                    ImU32 dCol = ImGui::ColorConvertFloat4ToU32(dispoCol);
+                    ImVec4 dColV = dispoCol;
+                    dColV.w = alpha;
+                    ImU32 dCol = ImGui::ColorConvertFloat4ToU32(dColV);
                     ImU32 npcOutline = ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, alpha));
                     TextEffects::AddTextOutline4(drawList, seg.font, seg.fontSize, pos, seg.displayText.c_str(), dCol, npcOutline, segOutlineWidth);
                 }

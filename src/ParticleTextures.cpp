@@ -31,8 +31,12 @@ namespace ParticleTextures
     static std::array<std::vector<TextureInfo>, NUM_TYPES> g_textures;
     static bool g_initialized = false;
 
-    // Point sampler for crisp pixel art
+    // Point sampler for small sprites
     static ID3D11SamplerState* g_pointSampler = nullptr;
+    // Linear sampler for high-resolution textures
+    static ID3D11SamplerState* g_linearSampler = nullptr;
+    static ID3D11BlendState* g_additiveBlend = nullptr;
+    static ID3D11BlendState* g_screenBlend = nullptr;
     static ID3D11Device* g_device = nullptr;
     static ID3D11DeviceContext* g_context = nullptr;
 
@@ -99,6 +103,24 @@ namespace ParticleTextures
         std::vector<BYTE> pixels(bufferSize);
         hr = converter->CopyPixels(nullptr, stride, bufferSize, pixels.data());
         if (FAILED(hr)) return info;
+
+        // Sanitize transparent pixels so blend modes (especially screen-like) don't pick up
+        // hidden RGB from fully transparent texels and produce box artifacts.
+        {
+            const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+            for (size_t i = 0; i < pixelCount; ++i) {
+                const size_t idx = i * 4;
+                BYTE& r = pixels[idx + 0];
+                BYTE& g = pixels[idx + 1];
+                BYTE& b = pixels[idx + 2];
+                const BYTE a = pixels[idx + 3];
+                if (a == 0) {
+                    r = 0;
+                    g = 0;
+                    b = 0;
+                }
+            }
+        }
 
         // Create D3D11 texture
         D3D11_TEXTURE2D_DESC texDesc = {};
@@ -194,23 +216,64 @@ namespace ParticleTextures
         g_device = device;
         device->GetImmediateContext(&g_context);
 
-        // Create point sampler for crisp pixel art
-        D3D11_SAMPLER_DESC samplerDesc = {};
-        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;  // No interpolation
-        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-        samplerDesc.MipLODBias = 0.0f;
-        samplerDesc.MaxAnisotropy = 1;
-        samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-        samplerDesc.MinLOD = 0;
-        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        // Create point sampler for small sprites
+        D3D11_SAMPLER_DESC pointDesc = {};
+        pointDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;  // No interpolation
+        pointDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        pointDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        pointDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        pointDesc.MipLODBias = 0.0f;
+        pointDesc.MaxAnisotropy = 1;
+        pointDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        pointDesc.MinLOD = 0;
+        pointDesc.MaxLOD = D3D11_FLOAT32_MAX;
 
-        HRESULT hr = device->CreateSamplerState(&samplerDesc, &g_pointSampler);
+        HRESULT hr = device->CreateSamplerState(&pointDesc, &g_pointSampler);
         if (FAILED(hr)) {
             SKSE::log::warn("ParticleTextures: Failed to create point sampler");
         } else {
-            SKSE::log::info("ParticleTextures: Created point sampler for pixel art");
+            SKSE::log::info("ParticleTextures: Created point sampler for small sprites");
+        }
+
+        // Create linear sampler for high-resolution textures
+        D3D11_SAMPLER_DESC linearDesc = pointDesc;
+        linearDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        hr = device->CreateSamplerState(&linearDesc, &g_linearSampler);
+        if (FAILED(hr)) {
+            SKSE::log::warn("ParticleTextures: Failed to create linear sampler");
+        } else {
+            SKSE::log::info("ParticleTextures: Created linear sampler for HD particles");
+        }
+
+        // Create additive blend state for bright magical particles
+        D3D11_BLEND_DESC addDesc = {};
+        addDesc.AlphaToCoverageEnable = FALSE;
+        addDesc.IndependentBlendEnable = FALSE;
+        addDesc.RenderTarget[0].BlendEnable = TRUE;
+        addDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        addDesc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        addDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        addDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        addDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        addDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        addDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        hr = device->CreateBlendState(&addDesc, &g_additiveBlend);
+        if (FAILED(hr)) {
+            SKSE::log::warn("ParticleTextures: Failed to create additive blend state");
+        } else {
+            SKSE::log::info("ParticleTextures: Created additive blend state");
+        }
+
+        // Create a screen-like blend state for softer luminous sprites.
+        // Gate source contribution by source alpha to avoid rectangle artifacts.
+        D3D11_BLEND_DESC screenDesc = addDesc;
+        screenDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        screenDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_COLOR;
+        hr = device->CreateBlendState(&screenDesc, &g_screenBlend);
+        if (FAILED(hr)) {
+            SKSE::log::warn("ParticleTextures: Failed to create screen blend state");
+        } else {
+            SKSE::log::info("ParticleTextures: Created screen blend state");
         }
 
         // Base path for particle textures
@@ -250,11 +313,21 @@ namespace ParticleTextures
         return g_initialized;
     }
 
-    // Callback to set point sampler before drawing pixel art
-    static void SetPointSamplerCallback(const ImDrawList*, const ImDrawCmd*)
+    // Callback to set a specific sampler before drawing a sprite.
+    static void SetSamplerCallback(const ImDrawList*, const ImDrawCmd* cmd)
     {
-        if (g_context && g_pointSampler) {
-            g_context->PSSetSamplers(0, 1, &g_pointSampler);
+        auto* sampler = reinterpret_cast<ID3D11SamplerState*>(cmd ? cmd->UserCallbackData : nullptr);
+        if (g_context && sampler) {
+            g_context->PSSetSamplers(0, 1, &sampler);
+        }
+    }
+
+    static void SetBlendCallback(const ImDrawList*, const ImDrawCmd* cmd)
+    {
+        auto* blend = reinterpret_cast<ID3D11BlendState*>(cmd ? cmd->UserCallbackData : nullptr);
+        if (g_context && blend) {
+            constexpr float blendFactor[4] = {0, 0, 0, 0};
+            g_context->OMSetBlendState(blend, blendFactor, 0xFFFFFFFF);
         }
     }
 
@@ -284,33 +357,67 @@ namespace ParticleTextures
         return hash;
     }
 
+    static const TextureInfo* GetTextureInfoForIndex(int style, int particleIndex)
+    {
+        if (style < 0 || style >= NUM_TYPES) return nullptr;
+        if (g_textures[style].empty()) return nullptr;
+
+        const size_t texCount = g_textures[style].size();
+        const size_t texIndex = HashIndex(style, particleIndex) % texCount;
+        return &g_textures[style][texIndex];
+    }
+
     ImTextureID GetRandomTexture(int style, int particleIndex)
     {
-        if (style < 0 || style >= NUM_TYPES) return ImTextureID{};
-        if (g_textures[style].empty()) return ImTextureID{};
-
-        // Hash the particle index for varied but stable texture assignment
-        // Each particle gets a consistent texture
-        // but the distribution is randomized
-        size_t texCount = g_textures[style].size();
-        size_t texIndex = HashIndex(style, particleIndex) % texCount;
-
-        return reinterpret_cast<ImTextureID>(g_textures[style][texIndex].srv);
+        const TextureInfo* info = GetTextureInfoForIndex(style, particleIndex);
+        return info ? reinterpret_cast<ImTextureID>(info->srv) : ImTextureID{};
     }
 
     void DrawSpriteWithIndex(ImDrawList* list, const ImVec2& center, float size,
-                             int style, int particleIndex, ImU32 color, float rotation)
+                             int style, int particleIndex, ImU32 color,
+                             BlendMode blendMode, float rotation)
     {
         if (!list || style < 0 || style >= NUM_TYPES) return;
 
-        ImTextureID tex = GetRandomTexture(style, particleIndex);
-        if (!tex) return;
+        const TextureInfo* texInfo = GetTextureInfoForIndex(style, particleIndex);
+        if (!texInfo || !texInfo->srv) return;
+        ImTextureID tex = reinterpret_cast<ImTextureID>(texInfo->srv);
 
-        float halfSize = size * 0.5f;
+        // Normalize display size for high-resolution textures.
+        // 2K (2048px) sources should display at a visible size, not shrink to dots.
+        const int texMaxPx = (texInfo->width > texInfo->height) ? texInfo->width : texInfo->height;
+        const float texMaxDim = static_cast<float>(texMaxPx);
+        const float resolutionScale = (texMaxDim > 0.0f)
+            ? std::clamp(1200.0f / texMaxDim, 0.45f, 1.0f)
+            : 1.0f;
+        const float scaledSize = size * resolutionScale;
+        float halfSize = scaledSize * 0.5f;
+        if (halfSize <= 0.01f) return;
 
-        // Set point sampler for crisp pixel art
-        if (g_pointSampler) {
-            list->AddCallback(SetPointSamplerCallback, nullptr);
+        // Use linear filtering for HD textures, point filtering for tiny sprites.
+        ID3D11SamplerState* samplerToUse = (texMaxDim > 64.0f && g_linearSampler)
+            ? g_linearSampler
+            : g_pointSampler;
+
+        ID3D11BlendState* blendToUse = nullptr;
+        switch (blendMode) {
+            case BlendMode::Additive:
+                blendToUse = g_additiveBlend;
+                break;
+            case BlendMode::Screen:
+                blendToUse = g_screenBlend;
+                break;
+            case BlendMode::Alpha:
+            default:
+                blendToUse = nullptr;
+                break;
+        }
+
+        if (samplerToUse) {
+            list->AddCallback(SetSamplerCallback, samplerToUse);
+        }
+        if (blendToUse) {
+            list->AddCallback(SetBlendCallback, blendToUse);
         }
 
         if (rotation == 0.0f) {
@@ -351,7 +458,7 @@ namespace ParticleTextures
         }
 
         // Reset to let ImGui restore its default sampler
-        if (g_pointSampler) {
+        if (samplerToUse || blendToUse) {
             list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         }
     }

@@ -78,6 +78,7 @@ namespace Settings
     // Display Options
     float VerticalOffset = 8.0f;
     bool  HidePlayer = false;
+    bool  HideCreatures = false;
     int   ReloadKey = 0;  // 0 = disabled, 207 = End key
 
     // Animation
@@ -545,6 +546,7 @@ namespace Settings
             // Display Options
             else if (key == "VerticalOffset") VerticalOffset = ParseFloat(val, 8.0f);
             else if (key == "HidePlayer") HidePlayer = (ParseInt(val, 0) != 0);
+            else if (key == "HideCreatures") HideCreatures = (ParseInt(val, 0) != 0);
             else if (key == "ReloadKey") ReloadKey = ParseInt(val, 0);
             else if (key == "AnimSpeedLowTier") AnimSpeedLowTier = ParseFloat(val, 0.0f);
             else if (key == "AnimSpeedMidTier") AnimSpeedMidTier = ParseFloat(val, 0.0f);

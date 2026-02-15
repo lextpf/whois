@@ -49,6 +49,12 @@
  */
 namespace ParticleTextures
 {
+    enum class BlendMode {
+        Alpha = 0,
+        Additive = 1,
+        Screen = 2
+    };
+
     /**
      * Initialize particle textures using the D3D11 device.
      * Scans subfolders and loads all PNG textures.
@@ -91,8 +97,11 @@ namespace ParticleTextures
      * @param style Particle style (determines which texture folder)
      * @param particleIndex Index of the particle
      * @param color Tint color (white = no tint)
+     * @param blendMode Blend state to use while drawing this sprite
      * @param rotation Rotation angle in radians
      */
     void DrawSpriteWithIndex(ImDrawList* list, const ImVec2& center, float size,
-                             int style, int particleIndex, ImU32 color, float rotation = 0.0f);
+                             int style, int particleIndex, ImU32 color,
+                             BlendMode blendMode = BlendMode::Alpha,
+                             float rotation = 0.0f);
 }
