@@ -31,32 +31,32 @@
 #include <imgui_internal.h>
 #include <imgui_stdlib.h>
 
-/// Export macro for DLL entry points
+/// @brief Export marker for DLL entry points.
 #define DLLEXPORT __declspec(dllexport)
 
-/// Alias for SKSE's logging interface
+/// @brief Short name for the SKSE logging interface.
 namespace logger = SKSE::log;
 
 /**
- * Extensions to CommonLibSSE's reverse-engineered types.
- *
- * Adds comparison and hash support for `BSPointerHandle` types, enabling
- * their use as keys in ordered and unordered containers.
- *
+ * @namespace RE
+ * @brief Extensions to CommonLibSSE's reverse-engineered types.
+ * @author Alex (https://github.com/lextpf)
  * @ingroup Utilities
+ *
+ * Adds comparison and hash support to `BSPointerHandle`, so a handle can be a key in ordered
+ * and unordered containers.
  */
 namespace RE
 {
 /**
- * Less-than comparison for BSPointerHandle.
+ * @brief Order two handles by native handle value.
  *
- * Enables use in `std::map`, `std::set`, and sorted algorithms.
- * Compares the underlying native handle values.
+ * Makes `BSPointerHandle` usable in `std::map`, `std::set`, and sorted algorithms.
  *
- * @tparam T Handle target type (e.g., Actor, TESObjectREFR).
+ * @tparam T Handle target type, for example Actor or TESObjectREFR.
  * @param[in] a_lhs Left-hand operand.
  * @param[in] a_rhs Right-hand operand.
- * @return `true` if lhs handle value is less than rhs.
+ * @return `true` when the left native handle value is smaller than the right one.
  *
  * @see hash_value
  */
@@ -67,13 +67,13 @@ bool operator<(const RE::BSPointerHandle<T>& a_lhs, const RE::BSPointerHandle<T>
 }
 
 /**
- * Boost-compatible hash function for BSPointerHandle.
+ * @brief Boost-compatible hash for a handle.
  *
- * Enables use with `boost::hash` and `boost::unordered_map/set`.
+ * Makes `BSPointerHandle` usable with `boost::hash` and the Boost unordered containers.
  *
  * @tparam T Handle target type.
  * @param[in] a_handle Handle to hash.
- * @return Hash value derived from native handle.
+ * @return Hash of the native handle value.
  */
 template <class T>
 std::size_t hash_value(const BSPointerHandle<T>& a_handle)
@@ -84,24 +84,41 @@ std::size_t hash_value(const BSPointerHandle<T>& a_handle)
 }  // namespace RE
 
 /**
- * Hook utilities and STL extensions for SKSE plugins.
+ * @namespace Stl
+ * @brief Hook utilities and STL extensions for SKSE plugins.
+ * @author Alex (https://github.com/lextpf)
+ * @ingroup Utilities
  *
- * Provides template functions for common hooking patterns used in SKSE plugins.
- * All hook functions use SKSE's trampoline for safe code redirection.
+ * `WriteThunkCall` and `HookFunctionPrologue` redirect code through SKSE's trampoline.
+ * `WriteVfunc` patches a vtable slot in place through `REL::Relocation::write_vfunc` and uses
+ * no trampoline memory.
  *
  * @see SKSE::GetTrampoline()
  */
 namespace Stl
 {
-/// Redirect a 5-byte `call` instruction to `T::thunk` via SKSE's trampoline.
-///
-/// The original callee address is saved in `T::func` so the hook can
-/// forward to it.
-///
-/// @tparam T Hook descriptor providing `static decltype(func) func` and
-///           `static thunk(...)`.
-/// @param a_src Address of the `call` instruction to patch.
-/// @pre @p a_src points to a 5-byte relative `call` instruction.
+/**
+ * @brief Redirect a five-byte call through an SKSE trampoline.
+ *
+ * The function redirects the
+ * call to `T::thunk` and stores the original callee address in
+ * `T::func`.
+ *
+ * @tparam T Hook
+ * descriptor that provides `static decltype(func) func` and
+ *              `static thunk(...)`.
+ *
+ * @param a_src Address of the call instruction to patch.
+ * @pre `a_src` points to a five-byte
+ * relative call instruction.
+ * @warning A CommonLibSSE failure, such as exhausted trampoline space
+ * or a missing Address
+ *          Library ID, calls `stl::report_and_fail`. That function shows a
+ * message box and
+ *          terminates the process. A try/catch block around this helper does not
+ * intercept
+ *          the failure.
+ */
 template <class T>
 void WriteThunkCall(std::uintptr_t a_src)
 {
@@ -109,12 +126,30 @@ void WriteThunkCall(std::uintptr_t a_src)
     T::func = trampoline.write_call<5>(a_src, T::thunk);
 }
 
-/// Overwrite a vtable entry with `T::thunk`.
-///
-/// Saves the original function pointer in `T::func`.
-///
-/// @tparam F Class whose vtable is patched. Must provide `VTABLE`.
-/// @tparam T Hook descriptor providing `idx`, `func`, and `thunk`.
+/**
+ * @brief Replace one vtable entry with a hook thunk.
+ *
+ * The function stores the original
+ * function pointer in `T::func` and writes `T::thunk` into
+ * the selected slot.
+ *
+ * @tparam F
+ * Class whose vtable is patched. The class must provide `VTABLE`.
+ * @tparam T Hook descriptor that
+ * provides `idx`, `func`, and `thunk`.
+ * @pre `T::idx` is a valid slot in `F::VTABLE[0]`. An
+ * invalid index writes past the vtable and
+ *      corrupts memory.
+ * @warning A missing Address
+ * Library ID for `F::VTABLE[0]` calls
+ *          `stl::report_and_fail`. That function shows a
+ * message box and terminates the
+ *          process. A try/catch block does not intercept the
+ * failure. In Release, a patch
+ *          site that cannot be made writable fails silently because
+ * `REL::safe_write` only
+ *          asserts.
+ */
 template <class F, class T>
 void WriteVfunc()
 {
@@ -122,18 +157,52 @@ void WriteVfunc()
     T::func = vtbl.write_vfunc(T::idx, T::thunk);
 }
 
-/// Prologue-patching hook for functions that cannot use a simple call redirect.
-///
-/// Uses Xbyak to generate a trampoline that copies the first @p BYTES bytes
-/// of the original function, then jumps back to `a_src + BYTES`. A 5-byte
-/// branch at @p a_src is overwritten to redirect to `T::thunk`. The
-/// trampoline address is stored in `T::func` so `T::thunk` can call the
-/// original prologue.
-///
-/// @tparam T     Hook descriptor providing `func` and `thunk`.
-/// @tparam BYTES Number of prologue bytes to relocate (must be >= 5).
-/// @param a_src  Address of the function prologue to patch.
-/// @pre @p BYTES covers complete instructions at @p a_src (no mid-instruction split).
+/**
+ * @brief Install a hook at a function prologue.
+ *
+ * Xbyak generates a trampoline that copies
+ * the first `BYTES` bytes of the original function
+ * and then jumps to `a_src + BYTES`. A
+ * five-byte branch at `a_src` redirects to `T::thunk`.
+ * The function stores the trampoline
+ * address in `T::func`, so the thunk can run the original
+ * prologue.
+ *
+ * @verbatim
+ * Before
+ * patching:
+ *
+ * a_src                                                a_src + BYTES
+ *   |
+ * [complete original instructions, BYTES bytes]          | [function body ...]
+ *
+ * After
+ * patching:
+ *
+ * a_src -> [five-byte branch to T::thunk]
+ *                              |
+ * +--
+ * optional original call --> T::func
+ * |
+ * +--> [copy of BYTES]
+ * |
+ * +--> a_src + BYTES
+ *
+ * @endverbatim
+ *
+ * Only five bytes are overwritten at `a_src`. The relocated block contains all
+ * `BYTES`
+ * original bytes, including any bytes beyond the branch.
+ *
+ * @tparam T     Hook
+ * descriptor that provides `func` and `thunk`.
+ * @tparam BYTES Number of prologue bytes to
+ * relocate. The value must be at least five.
+ * @param a_src  Address of the function prologue to
+ * patch.
+ * @pre `BYTES` covers complete instructions at `a_src`. It does not split an
+ * instruction.
+ */
 template <class T, std::size_t BYTES>
 void HookFunctionPrologue(std::uintptr_t a_src)
 {
@@ -163,13 +232,24 @@ void HookFunctionPrologue(std::uintptr_t a_src)
     T::func = reinterpret_cast<std::uintptr_t>(alloc);
 }
 
-/// Create a view over enum values from @p first (inclusive) to @p last (exclusive).
-///
-/// Maps each underlying integer back to the enum type via `static_cast`.
-/// @tparam E  Enum type (deduced from arguments).
-/// @param first First enumerator in the range (included).
-/// @param last  Past-the-end enumerator (excluded).
-/// @return A `views::iota | views::transform` range of enum values.
+/**
+ * @brief Create a view over a half-open range of enum values.
+ *
+ * The range includes `first`
+ * and excludes `last`. The function maps each underlying integer
+ * back to the enum type with
+ * `static_cast`. The parameters are deduced independently, but the
+ * element type comes from
+ * `decltype(first)`. Both parameters must have the same enum type. A
+ * mismatched `last` can
+ * compile and reinterpret the values.
+ *
+ * @param first  First enumerator in the range.
+ * @param
+ * last   Past-the-end enumerator.
+ * @return       A `views::iota | views::transform` range of enum
+ * values.
+ */
 constexpr inline auto EnumRange(auto first, auto last)
 {
     auto result =
@@ -180,28 +260,37 @@ constexpr inline auto EnumRange(auto first, auto last)
 }
 
 /**
- * Compile-time bidirectional enum-string mapping.
+ * @struct EnumStringMap
+ * @brief Compile-time bidirectional enum-string mapping.
  *
- * @tparam E    Enum type.
- * @tparam N    Number of entries.
+ * @tparam E Enum type.
+ * @tparam N Number of entries.
  */
 template <typename E, std::size_t N>
 struct EnumStringMap
 {
-    /// A single enum-value / string-name pair.
+    /**
+     * @struct Entry
+     * @brief One enum-value and string-name pair.
+     */
     struct Entry
     {
         std::string_view name;  ///< Display name for the enumerator.
         E value;                ///< Corresponding enum value.
     };
 
-    std::array<Entry, N> entries;
+    std::array<Entry, N> entries;  ///< Name/value pairs, scanned linearly; first match wins.
 
-    /// Look up an enum value by its string name.
-    ///
-    /// @param s        String to search for (exact match).
-    /// @param fallback Value returned when no entry matches @p s.
-    /// @return The matching enum value, or @p fallback if not found.
+    /**
+     * @brief Find an enum value by its string name.
+     *
+     * @param s         String
+     * to match exactly against an entry name.
+     * @param fallback  Value to return when no entry
+     * matches.
+     * @return          The matching enum value, or `fallback` when no entry
+     * matches.
+     */
     constexpr E fromString(std::string_view s, E fallback) const
     {
         for (const auto& e : entries)
@@ -214,10 +303,13 @@ struct EnumStringMap
         return fallback;
     }
 
-    /// Convert an enum value to its string name.
-    ///
-    /// @param v Enum value to look up.
-    /// @return The matching name, or `"unknown"` if not found.
+    /**
+     * @brief Convert an enum value to its string name.
+     *
+     * @param v  Enum value
+     * to find.
+     * @return   The matching name, or `"unknown"` when no entry matches.
+     */
     constexpr std::string_view toString(E v) const
     {
         for (const auto& e : entries)
@@ -233,19 +325,15 @@ struct EnumStringMap
 }  // namespace Stl
 
 /**
- * Select address offset based on Skyrim edition.
+ * @brief Select an address offset for the detected Skyrim edition.
  *
- * Used with REL::ID or direct addresses to support both Skyrim SE and AE builds.
- * The correct value is selected at compile time based on the SKYRIM_AE define.
+ * Used with `REL::ID` or a direct address so one DLL serves Skyrim SE and AE/GOG.
+ * CommonLibSSE-NG picks the value that matches the detected runtime.
  *
  * @param se Skyrim SE (1.5.97) offset.
- * @param ae Skyrim AE (1.6.x) offset.
- * @return The appropriate offset for the current build target.
+ * @param ae Skyrim AE/GOG (1.6.x) offset.
+ * @return The appropriate offset for the current runtime.
  */
-#ifdef SKYRIM_AE
-#define GLYPH_OFFSET(se, ae) ae
-#else
-#define GLYPH_OFFSET(se, ae) se
-#endif
+#define GLYPH_OFFSET(se, ae) REL::Relocate((se), (ae))
 
 #include "Version.hpp"
