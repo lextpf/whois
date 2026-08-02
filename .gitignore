@@ -22,3 +22,6 @@ Font Awesome*
 # Runtime assets (badges, duotone, fonts, particles) are never checked in --
 # they ship with the deploy package, not the repo.
 assets/
+
+# understand-anything analysis cache
+.understand-anything/
