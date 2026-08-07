@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderConstants.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -7,73 +9,142 @@
 #include <string>
 #include <vector>
 
+// clang-format off
 /**
  * @namespace Settings
  * @brief Configuration management and INI parsing.
  * @author Alex (https://github.com/lextpf)
  * @ingroup Settings
  *
- * Contains all user-configurable settings loaded from `glyph.ini`,
- * including tier definitions, visual effects, fonts, and behavior parameters.
+ * Holds every user-configurable value: tier definitions, visual effects, fonts
+ * and behavior parameters.
  *
  * ## :material-file-cog-outline: Configuration File
  *
- * Settings are loaded from `Data/SKSE/Plugins/glyph.ini` using a simple
- * key-value format with section headers for tier definitions.
+ * `Data/SKSE/Plugins/glyph.ini`, a key-value file with section headers.
  *
- * | Section              | Purpose                                  |
- * |----------------------|------------------------------------------|
- * | `[General]`          | Core settings, fonts, distances          |
- * | `[TierN]`            | Per-tier colors, effects, ornaments      |
- * | `[SpecialTitleN]`    | Keyword-based title overrides            |
- * | `[Display]`          | Format string for nameplate composition  |
- * | `[Visual]`           | LOD, overlap, motion trail, wave         |
- * | `[Fonts]`            |
- * Font paths and sizes                     | | `[Particles]`        | Particle aura settings | |
- * `[Occlusion]`        | Line-of-sight culling settings           | | `[Debug]`            | Debug
- * overlay toggle                     |
+ * | Section           | Purpose                                            |
+ * |-------------------|----------------------------------------------------|
+ * | `[General]`       | Core scalars: fonts, distances, effects, behavior   |
+ * | `[TierN]`         | Per-tier colors, effects, ornaments, particles      |
+ * | `[SpecialTitleN]` | Keyword-based title and style overrides             |
+ * | `[HonorificN]`    | Faction-driven honorific titles                     |
+ * | `[RegisterN]`     | Context-conditional overlay profiles                |
+ * | `[Labels]`        | Label strings for the `%r`, `%d`, `%c` tokens       |
+ * | `[LevelDelta]`    | Level-delta classification thresholds               |
+ * | `[Icons]`         | Status icon badges and tier emblems                 |
+ * | `[Focus]`         | Focus-target expanded nameplate                     |
+ * | `[Deck]`          | Collectible character card capture                  |
+ * | `[Graffito]`      | Perspective-correct actor-plane text                |
+ * | `[Quiet]`         | Camera-motion quieting                              |
+ * | `[DeathRite]`     | One-shot death animation                            |
+ * | `[Compat]`        | TrueHUD / moreHUD deconfliction                     |
+ * | `[Candlelight]`   | Exposure-adaptive brightness                        |
+ * | `[DepthClip]`     | Per-pixel depth occlusion                           |
  *
- * @note Scalar settings are matched by key name regardless of which
- * section they appear in.
+ * The parser also accepts `[Display]`, `[Visual]`, `[Fonts]`, `[Particles]`,
+ * `[Occlusion]` and `[Debug]` without a warning, but the shipped `glyph.ini`
+ * uses none of them.  Keys written before the first section header are accepted
+ * as global scope; the shipped `Format` key sits there.  Any other section name
+ * produces one parse warning per distinct name, and its keys are still matched
+ * against the scalar table.
  *
- * @note Runtime defaults are defined in the `kSettings` binding table in
+ * @note Scalar settings are matched by key name regardless of which section
+ * they appear in.  The four indexed families are the exception: inside
+ * `[TierN]`, `[SpecialTitleN]`, `[HonorificN]` and `[RegisterN]` the section's
+ * own field names (MinLevel, MaxLevel, Name/Title, Color, GlowColor,
+ * TitleEffect, ParticleTypes, ParticleCount, Priority, Faction, MinRank,
+ * When, ...) are consumed by the section parser first and never reach the
+ * scalar table.  `ParticleCount` inside `[Tier0]` therefore sets that tier's
+ * count, not the global `ParticleCount`.
+ *
+ * @note Runtime defaults for scalars live in the `kSettings` binding table in
  * `Settings.cpp`.  `Load()` calls `ResetToDefaults()` first, which applies
- * the `kSettings` defaults to every field, then parses `glyph.ini` to
- * overwrite any keys that are present.  Struct member initializers shown
- * below are compile-time placeholders only and may differ from the
- * operative `kSettings` values.
+ * those defaults to every field, then parses `glyph.ini` over them.  The
+ * struct member initializers below are compile-time placeholders and may
+ * differ from the operative `kSettings` values.  The indexed families are not
+ * in `kSettings`: `TierDefinition` defaults come from `MakeDefaultTier()` and
+ * `SpecialTitleDefinition` defaults are assigned inline in `Load()` when a
+ * section grows the vector.
  *
  * ## :material-refresh: Hot Reload
  *
- * Settings can be reloaded at runtime by pressing the configured `ReloadKey`
- * (default: disabled; set to a virtual key code, e.g. `118` for F7).
- * This calls `Load()` and clears the actor cache.
+ * `ReloadKey` is a Win32 virtual key code.  Zero or a negative value disables
+ * the key.  The `kSettings` default is 0, which applies when the key is absent
+ * or `glyph.ini` is missing; the shipped `glyph.ini` sets 118, the code for F7.
+ *
+ * The render thread only requests the reload.  `Load()` itself is queued to the
+ * game thread through the SKSE task interface, so the file read never stalls a
+ * frame, and snapshot updates stay paused for the whole operation.  The render
+ * thread clears the actor cache and requests an occlusion-cache clear when the
+ * reload reports back.  When the task interface is unavailable, the render
+ * thread runs `Load()` itself; this is safe because nothing in the parser
+ * dereferences a game object.
+ *
+ * ```mermaid
+ * sequenceDiagram
+ *     participant R as Render thread
+ *     participant G as Game thread
+ *     R->>R: ReloadKey edge sets reloadRequested
+ *     R->>R: in-flight snapshot task drains, then pauseSnapshotUpdates
+ *     R->>G: AddTask(Settings::Load)
+ *     G->>G: Load() under a unique Mutex() lock, then Generation() + 1
+ *     G-->>R: reloadCompleted
+ *     R->>R: clear actor cache and occlusion cache, resume snapshots
+ * ```
  *
  * ## :material-blur-linear: Distance Fading
  *
- * Nameplate alpha fades based on distance $d$ from camera to actor using
- * a squared quintic smoothstep for a gentle falloff:
+ * Nameplate alpha fades with the distance $d$ from the player to the actor
+ * (not from the camera), through a squared quintic smoothstep:
  *
- * $$t = \text{clamp}\!\left(\frac{d - d_{start}}{d_{end} - d_{start}},\; 0,\; 1\right)$$
+ * $$d'_{start} = d_{start} \cdot m_{fade}, \quad d'_{end} = d_{end} \cdot m_{fade}$$
+ *
+ * $$t = \text{clamp}\!\left(\frac{d - d'_{start}}{d'_{end} - d'_{start}},\; 0,\; 1\right)$$
  *
  * $$\text{smoothstep}(t) = 6t^5 - 15t^4 + 10t^3$$
  *
  * $$\alpha = \left(1 - \text{smoothstep}(t)\right)^2$$
  *
- * This produces near-full opacity at close range, a gradual falloff through
+ * The denominator is floored at 1 game unit, so a register multiplier that
+ * collapses the envelope cannot divide by zero.
+ *
+ * $m_{fade}$ is the active register's smoothed `FadeDistanceMultiplier`.  It
+ * is 1.0 when no register matches or when `RegistersEnabled = false`.  The
+ * shipped INI defines `[Register0]` with `FadeDistanceMultiplier = 0.85`, so
+ * a stock install pulls the envelope in at night in exteriors.
+ *
+ * The result is near-full opacity at close range, a gradual falloff through
  * mid-range, and rapid fadeout approaching `FadeEndDistance`.
  *
  * ## :material-format-font-size-decrease: Font Scaling
  *
- * Font size scales down with distance using square root falloff, which
- * keeps text readable longer before shrinking:
+ * Font size falls off with the square root of distance, which keeps text
+ * readable longer before it shrinks:
  *
  * $$t = \text{clamp}\!\left(\frac{d - d_{start}}{d_{end} - d_{start}},\; 0,\; 1\right)$$
  *
  * $$scale = 1 + (scale_{min} - 1) \cdot \sqrt{t}$$
  *
- * At $d = d_{start}$ the scale is $1.0$ (full size). At $d = d_{end}$
- * it reaches $scale_{min}$ (default $0.1$, or 10% of original).
+ * Absent the two stages below, the scale is $1.0$ (full size) at
+ * $d = d_{start}$ and reaches $scale_{min}$ (default $0.1$, or 10% of
+ * original) at $d = d_{end}$.
+ *
+ * The denominator is floored at 1 game unit here as well.
+ *
+ * The curve is evaluated twice, on the player-to-actor distance and on the
+ * camera-to-actor distance.  The camera term is skipped when the player camera
+ * is unavailable.  Otherwise the smaller result wins, so a camera pulled back
+ * behind the player shrinks the text further:
+ *
+ * $$scale = \min\left(scale_{player},\; scale_{camera}\right)$$
+ *
+ * When `MinimumPixelHeight` is above zero, a pixel floor is applied last:
+ *
+ * $$scale = \max\left(scale,\; \text{MinimumPixelHeight} / \text{NameFontSize}\right)$$
+ *
+ * The register `FadeDistanceMultiplier` does not scale $d_{start}$ or
+ * $d_{end}$ here; it applies to the alpha fade only.
  *
  * ## :material-connection: SKSE Integration
  *
@@ -83,13 +154,17 @@
  * | Log file       | `Documents/My Games/Skyrim Special Edition/SKSE/glyph.log`|
  * | Actor data     | `RE::TESDataHandler`                                      |
  */
+// clang-format on
 namespace Settings
 {
 /**
- * RGB color triplet with channel values in [0.0, 1.0].
+ * @struct Color3
+ * @brief RGB color triplet.
+ * @ingroup Settings
  *
- * Replaces raw `float[3]` arrays for color fields, providing named access,
- * clamping, and conversion helpers.
+ * Backs every color field.  Channel values are in [0.0, 1.0].  `clamp01()`
+ * constrains all three channels in place and returns the object; `White()`
+ * builds the all-ones default.
  */
 struct Color3
 {
@@ -116,46 +191,76 @@ struct Color3
 };
 
 /**
- * Display format segment for nameplate composition.
+ * @struct Segment
+ * @brief Display format segment for nameplate composition.
+ * @ingroup Settings
  *
- * Defines a single segment of the nameplate display. Multiple segments
- * are concatenated horizontally to form the complete nameplate.
+ * Segments are concatenated horizontally to form one nameplate row.
  *
  * **Format Placeholders:**
  * - `%n` - Actor's display name
  * - `%l` - Actor's level
- * - `%t` - Tier title (from TierDefinition)
+ * - `%t` - Title, expanded on the title line only.  Every other row copies the
+ *   two characters through literally.
+ * - `%r` - Relationship label, from LabelSettings
+ * - `%d` - Level-delta label, from LabelSettings
+ * - `%c` - Creature-kind label, from LabelSettings
+ *
+ * Substitution is single pass, so a placeholder inside a substituted value is
+ * not expanded again.
+ *
+ * Segments are not separate INI keys.  One `Format` key holds the whole row
+ * as a run of double-quoted segments, and one `InfoFormat` key holds the
+ * info row the same way.  Both keys are matched in any section; the shipped
+ * INI puts `Format` at global scope.
  *
  * ```ini
- * ; Example: "Lydia [42]" with name in name font, level in level font
- * [Display]
- * Segment1 = %n,0
- * Segment2 = " [",0
- * Segment3 = %l,1
- * Segment4 = "]",0
+ * ; Three segments. The first holds %t and becomes the title line, with a
+ * ; literal quote on each side. The other two form the main row: Lydia|lv.42
+ * Format = "\"%t\"" "%n" "|lv.%l"
  * ```
  *
- * @see DisplayFormat, TierDefinition
+ * Parsing rules:
+ * - A segment that contains `%t` is siphoned into the title line instead of
+ *   the main row.  Only `Format` siphons; a `%t` segment inside `InfoFormat`
+ *   stays in the info row.  When several `Format` segments contain `%t`, the
+ *   last one wins.
+ * - A `Format` value that yields no segments leaves the previous main row in
+ *   place, so an empty `Format` cannot blank the nameplate.  An empty
+ *   `InfoFormat` always clears the info row.
+ * - A segment that contains `%l` selects the level font automatically; there
+ *   is no per-segment font selector.  Every `InfoFormat` segment uses the
+ *   level font.
+ * - A `?` placed immediately after a segment's closing quote sets
+ *   `dropIfBlank` for that segment.
+ *
+ * @see DisplayFormat, InfoFormat, TierDefinition
  */
 struct Segment
 {
     std::string format;         ///< Format string with placeholders (%n, %l, %t, %r, %d, %c)
     bool useLevelFont = false;  ///< If true, uses level font; otherwise uses name font
-    bool dropIfBlank = false;   ///< Set by trailing `?` in Format / InfoFormat -- segment is
-                                ///< omitted when its expansion trims to empty.
+    /// Set by trailing `?` in Format / InfoFormat - segment is
+    /// omitted when its expansion trims to empty.
+    bool dropIfBlank = false;
 };
 
 /**
- * Visual effect types for text rendering.
+ * @enum EffectType
+ * @brief Visual effect types for text rendering.
+ * @ingroup Settings
  *
- * Defines the available visual effects that can be applied to
- * names, levels, and titles. Effects are rendered using ImGui's
+ * Applies to names, levels and titles.  Effects are drawn through ImGui's
  * draw list with per-vertex coloring.
  *
- * **Effect Categories:**
- * - Static: None, Gradient, VerticalGradient, DiagonalGradient, RadialGradient
- * - Animated: Shimmer, Ember, Aurora, Breathe, Mote, Wander
- * - Complex: Sparkle, Enchant, Frost, Drift
+ * **Effect Categories:** the animated and complex groups match one
+ * implementation translation unit each.
+ * - Static: None, Gradient, VerticalGradient, DiagonalGradient, RadialGradient.
+ *   The four gradients are in TextEffectsGradient.cpp; None is the plain fill,
+ *   drawn by the shared outline path in TextEffectsCore.cpp.
+ * - Animated: Shimmer, Ember, Breathe, Mote, Wander, Eclipse, Pulse, Electric
+ *   (TextEffectsAnimated.cpp)
+ * - Complex: Aurora, Sparkle, Enchant, Frost, Drift (TextEffectsComplex.cpp)
  *
  * @see EffectParams, TextEffects::ApplyVertexEffect
  */
@@ -168,28 +273,32 @@ enum class EffectType
     RadialGradient,    ///< Radial gradient from center (param1 = gamma)
     Shimmer,           ///< Moving highlight band (param1 = width, param2 = strength)
     Ember,             ///< Warm flickering glow (param1 = speed, param2 = intensity)
-    Aurora,   ///< Northern lights effect (param1 = speed, param2 = waves, param3 = intensity,
-              ///< param4 = sway)
+    /// Northern lights effect (param1 = speed, param2 = waves, param3 = intensity,
+    /// param4 = sway)
+    Aurora,
     Sparkle,  ///< Glittering stars (param1 = density, param2 = speed, param3 = intensity)
     Enchant,  ///< Flowing magical energy (param1 = speed, param2 = scale, param3 = intensity)
     Frost,    ///< Crystalline ice sparkle (param1 = density, param2 = speed, param3 = intensity)
     Breathe,  ///< Slow uniform brightness pulse (param1 = speed Hz, param2 = amplitude)
     Drift,    ///< Slow uniform hue wander (param1 = speed Hz, param2 = hue range degrees)
     Mote,     ///< Rare single twinkle (param1 = period s, param2 = peak alpha)
-    Wander,   ///< Per-character asynchronous breathing (param1 = speed Hz, param2 = amplitude,
-              ///< param3 = phase spread)
-    Eclipse,  ///< Shadow band sweeping with a hot leading rim (param1 = width,
-              ///< param2 = strength)
+    /// Per-character asynchronous breathing (param1 = speed Hz, param2 = amplitude,
+    /// param3 = phase spread)
+    Wander,
+    /// Shadow band sweeping with a hot leading rim (param1 = width,
+    /// param2 = strength)
+    Eclipse,
     Pulse,    ///< Weighty two-beat heartbeat glow (param1 = rate Hz, param2 = amplitude)
     Electric  ///< Rare crackling arc sweeping the text (param1 = rate Hz, param2 = intensity)
 };
 
 /**
- * Parameters for visual effects.
+ * @struct EffectParams
+ * @brief Parameters for visual effects.
+ * @ingroup Settings
  *
- * Generic parameter structure for effect configuration. Different effects
- * interpret the parameters differently. See EffectType documentation for
- * parameter meanings per effect.
+ * Each effect interprets the parameters differently; see EffectType for the
+ * per-effect meanings.
  *
  * ```cpp
  * // Aurora effect: speed=0.5, waves=3.0, intensity=1.0, sway=0.3
@@ -211,20 +320,23 @@ struct EffectParams
     float param2 = .0f;  ///< Effect parameter 2
     float param3 = .0f;  ///< Effect parameter 3
     float param4 = .0f;  ///< Effect parameter 4
-    float param5 = .0f;  ///< Effect parameter 5
+    float param5 = .0f;  ///< Effect parameter 5; parsed, but no effect reads it
 
-    bool useWhiteBase = false;  ///< Draw white base layer under rainbow effects for brightness
+    /// Set by the trailing `whiteBase` token in an effect string.  Parsed and
+    /// stored, but no draw path reads it, so it currently changes nothing.
+    bool useWhiteBase = false;
 };
 
 /**
- * Tier definition for level-based visual styling.
+ * @struct TierDefinition
+ * @brief Tier definition for level-based visual styling.
+ * @ingroup Settings
  *
- * Each tier defines visual properties for a range of character levels.
- * Higher tiers typically have more elaborate visual effects. Tiers are
- * defined in `[TierN]` sections of the INI file.
+ * One tier covers a range of character levels and supplies the visual
+ * properties for actors in it.  Tiers come from `[TierN]` INI sections.
  *
  * **Color Format:**
- * Colors are specified as comma-separated RGB floats in range [0.0, 1.0].
+ * Comma-separated RGB floats in range [0.0, 1.0].
  *
  * ```ini
  * [Tier5]
@@ -234,10 +346,19 @@ struct EffectParams
  * LeftColor = 0.2, 0.6, 1.0
  * RightColor = 0.8, 0.2, 1.0
  * HighlightColor = 1.0, 1.0, 1.0
- * TitleEffect = Shimmer, 0.3, 0.8
+ * TitleEffect = Shimmer 0.3,0.8
  * NameEffect = Gradient
  * LevelEffect = Gradient
  * ```
+ *
+ * **Effect Syntax:**
+ * Whitespace separates the effect name from its parameter list; the
+ * parameters themselves are comma-separated.  A comma directly after the
+ * effect name becomes part of the name token, so the lookup misses and the
+ * effect falls back to `EffectType::Gradient` without a warning.  At most five
+ * parameters are read; the rest are dropped.  The optional token `whiteBase`
+ * sets `EffectParams::useWhiteBase`.  It is matched case-insensitively anywhere
+ * in the parameter text, and everything from that position on is dropped.
  *
  * @see Tiers, EffectParams, Renderer::Draw
  */
@@ -250,18 +371,24 @@ struct TierDefinition
     Color3 rightColor;              ///< RGB color for name gradient right/bottom
     Color3 highlightColor;          ///< RGB color for shimmer/sparkle highlights
 
-    /// Per-element color overrides (optional - falls back to derived tier accents)
+    // Per-element color overrides.  Each empty optional falls back to a value
+    // derived from the three colors above; the derivations are named below.
     std::optional<Color3>
-        titleLeftColor;  ///< Title gradient left (default: companion accent from tier palette)
-    std::optional<Color3> titleRightColor;  ///< Title gradient right
+        titleLeftColor;  ///< Title gradient left (default: leftColor blended 25% toward white)
     std::optional<Color3>
-        levelLeftColor;  ///< Level gradient left (default: softened tier/highlight blend)
-    std::optional<Color3> levelRightColor;  ///< Level gradient right
+        titleRightColor;  ///< Title gradient right (default: rightColor blended 25% toward white)
+    std::optional<Color3>
+        levelLeftColor;  ///< Level gradient left (default: leftColor blended 40% toward white)
+    std::optional<Color3> levelRightColor;  ///< Level gradient right (rightColor, 40% toward white)
     std::optional<Color3> particleColor;    ///< Particle tint (default: highlightColor)
-    std::optional<Color3>
-        ornamentLeftColor;  ///< Ornament gradient left (default: vivid title/highlight accent)
-    std::optional<Color3>
-        ornamentRightColor;  ///< Ornament gradient right (default: vivid title/highlight accent)
+    /// Ornament gradient left.  When empty, the nameplate derives it from the
+    /// resolved title-left color: mixed 32% toward highlightColor, then 15% back
+    /// toward the name color, then saturation-boosted 1.25x.  A Deck card uses a
+    /// simpler fallback, the resolved title-left color itself.
+    std::optional<Color3> ornamentLeftColor;
+    /// Ornament gradient right.  Same recipe on the right-side colors, except
+    /// that the nameplate mixes 42% toward highlightColor instead of 32%.
+    std::optional<Color3> ornamentRightColor;
 
     EffectParams titleEffect;  ///< Visual effect for title text (player / special titles)
     EffectParams nameEffect;   ///< Visual effect for name text (player / special titles)
@@ -272,53 +399,61 @@ struct TierDefinition
     std::string
         rightOrnaments;  ///< Right side ornament characters (e.g., "BD"), empty = no ornaments
 
-    // Per-tier particle settings (empty = use global, "None" = disabled)
-    std::string
-        particleTypes;      ///< Particle types: "Stars,Wisps,Orbs,Sparks,Runes" (comma-separated)
-    int particleCount = 0;  ///< Number of particles (0 = use global setting)
+    // Per-tier particle settings. Only particleCount falls back to a global.
+    /// Comma-separated particle style tokens, e.g. "Snow,Firefly,Wisp,Runes".
+    /// Tokens are the case-insensitive names in `kParticleStyleTokens`; an
+    /// unknown token matches nothing and renders nothing.  An entry may carry
+    /// a weight as `token:weight`, e.g. "snow:2,wisp:0.5".  A weight is clamped
+    /// to 0.1-10 and sets the ratio between the listed styles only: the weights
+    /// are mean-normalized, so the tier's total particle budget holds and equal
+    /// weights behave exactly like no weights.  Empty or "None" disables
+    /// particles for this tier.
+    std::string particleTypes;
+    int particleCount = 0;  ///< Number of particles (0 = use the global ParticleCount)
 };
 
 /**
- * @brief Special title definition for MMORPG-style staff/VIP nameplates.
+ * @struct SpecialTitleDefinition
+ * @brief Name-keyword override of the normal tier styling.
  *
- * Special titles override normal tier styling when an actor's name contains
- * the specified keyword. Used for Admin, Moderator, VIP, etc. nameplates.
- *
- * | Field | Description |
- * |-------|-------------|
- * | keyword | Text to match in actor name (case-insensitive) |
- * | displayTitle | Title shown above name (e.g., "[ADMIN]") |
- * | color | RGB color for the nameplate |
- * | glowColor | RGB color for enhanced glow effect |
- * | forceOrnaments | Always show ornaments regardless of tier |
- * | forceParticles | Always show particle effects |
- * | priority | Higher priority special titles take precedence |
+ * When an actor's name contains `keyword`, this definition replaces the tier
+ * styling, giving staff- or VIP-style nameplates (Admin, Moderator, VIP).
+ * Defined in `[SpecialTitleN]` INI sections.
  */
 struct SpecialTitleDefinition
 {
-    std::string keyword;         ///< Keyword to match in name (case-insensitive)
-    std::string keywordLower;    ///< Cached lowercase keyword for fast runtime matching
-    std::string displayTitle;    ///< Title to display
-    Color3 color;                ///< RGB color for name/title
-    Color3 glowColor;            ///< RGB glow color (more saturated)
-    bool forceOrnaments;         ///< Always show ornaments
-    bool forceParticles;         ///< Always show particle aura
-    int priority;                ///< Higher = checked first
+    std::string keyword;       ///< Keyword to match in name (case-insensitive)
+    std::string keywordLower;  ///< Cached lowercase keyword for fast runtime matching
+    std::string displayTitle;  ///< Title to display
+    Color3 color;              ///< RGB color for name/title
+    Color3 glowColor;          ///< RGB glow color (more saturated)
+    /// Always show ornaments.  Omitting `ForceOrnaments` gives true, not false:
+    /// `Load()` assigns true when a `SpecialTitleN` section grows the vector.
+    /// The legacy key `ForceFlourishes` sets the same field.
+    bool forceOrnaments;
+    /// Always show particle aura.  Omitting `ForceParticles` gives true, as
+    /// above.  This is the only route to particles on an NPC plate.
+    bool forceParticles;
+    int priority;                ///< Higher = checked first (0 when the section omits Priority)
     std::string leftOrnaments;   ///< Left side ornament characters
     std::string rightOrnaments;  ///< Right side ornament characters
 };
 
 /**
- * @brief Deeds, Not Words -- a faction-driven honorific title.
+ * @struct HonorificDefinition
+ * @brief Faction-driven honorific title.
  *
- * Honorifics replace the static tier title with one the game state actually
- * granted: an actor (player included) that holds at least `minRank` in the
- * resolved faction shows `title` in the title slot the moment the deed is
- * done.  Defined in `[HonorificN]` INI sections; the highest-priority match
- * wins; special titles (name-keyword styling) still take precedence.
+ * An actor (the player included) that holds at least `minRank` in the resolved
+ * faction shows `title` in the title slot instead of the static tier title.
+ * Defined in `[HonorificN]` INI sections; the highest-priority match wins, and
+ * name-keyword special titles still take precedence.
  *
  * `factionSpec` is `0xFORMID` or `0xFORMID@Plugin.esp` (plugin defaults to
- * Skyrim.esm), resolved against the load order on the game thread.
+ * Skyrim.esm), resolved against the load order on the game thread.  A spec that
+ * does not resolve logs one warning per settings generation and never matches.
+ * On a priority tie the first match found wins.  Inside one faction that is the
+ * lower index in Honorifics(), but between two factions it is whichever faction
+ * the actor's faction walk reaches first, which is not index order.
  */
 struct HonorificDefinition
 {
@@ -330,9 +465,15 @@ struct HonorificDefinition
     bool npcOnly = false;     ///< Only NPC plates may earn this
 };
 
-/// Scene-context predicate bits for Registers (context-conditional profiles).
-/// The game thread computes the current mask once per snapshot; a register
-/// matches when all `whenMask` bits are set and no `whenNotMask` bit is.
+/**
+ * @namespace Settings::Context
+ * @brief Scene-context predicate bits for register selection.
+
+ * *
+ * The game thread computes the current mask once per snapshot. A register matches when all
+ *
+ * bits in `whenMask` are set and no bit in `whenNotMask` is set.
+ */
 namespace Context
 {
 inline constexpr uint32_t Interior = 1u << 0;  ///< Player's cell is interior
@@ -344,14 +485,50 @@ inline constexpr uint32_t Crowded = 1u << 5;   ///< Visible plates >= threshold
 }  // namespace Context
 
 /**
- * @brief A Register -- one context-conditional overlay profile.
+ * @struct RegisterDefinition
+ * @brief One context-conditional overlay profile.
  *
- * Registers bind a small, curated knob set to scene predicates so the
- * overlay swells and recedes with the scene instead of asking the player to
- * retune per situation: dimmer at night, fewer plates in a packed city,
- * quieter sub-lines in dialogue.  The highest-priority matching register is
- * active; transitions ease over `RegisterSettings::TransitionTime` on the
- * render thread.  An empty `When` matches every scene (a base register).
+ * Binds a small knob set to scene predicates so the overlay adjusts itself
+ * instead of needing per-situation retuning: dimmer at night, fewer plates in
+ * a crowded city,
+ * quieter sub-lines in dialogue.  The highest-priority
+ * matching register is active; transitions
+ * ease over
+ * `RegisterSettings::TransitionTime` on the render thread.  An empty `When`
+ * matches
+ * every scene.
+ *
+ * ```mermaid
+ * ---
+ * config:
+ *   theme: dark
+ *   look: handDrawn
+ * ---
+ *
+ * flowchart TD
+ *     C[Game thread computes the context mask] --> G{Registers enabled?}
+ *     G
+ * -- No --> N[Publish activeRegister = -1]
+ *     G -- Yes --> R[Scan configured entries in index
+ * order]
+ *     R --> M{All required bits set<br/>and all forbidden bits clear?}
+ *     M -- No -->
+ * Q{More entries?}
+ *     M -- Yes --> P{Priority greater than the current best?}
+ *     P -- Yes
+ * --> B[Replace the best match]
+ *     P -- No --> K[Keep the earlier match]
+ *     B --> Q
+ * K
+ * --> Q
+ *     Q -- Yes --> R
+ *     Q -- No --> U[Publish the best index, or -1]
+ *     U -->
+ * T[Render thread reads activeRegister]
+ *     N --> T
+ *     T --> E[Ease alpha, fade, sub-line,
+ * and hide-neutral values]
+ * ```
  */
 struct RegisterDefinition
 {
@@ -359,19 +536,28 @@ struct RegisterDefinition
     uint32_t whenMask = 0;     ///< Context bits that must all be set
     uint32_t whenNotMask = 0;  ///< Context bits that must all be clear
     float alphaMul = 1.0f;     ///< Overlay-wide alpha multiplier [0,1]
-    float fadeMul = 1.0f;      ///< Fade/scale distance multiplier [0.2,2]
+    /// Alpha-fade distance multiplier, INI key `FadeDistanceMultiplier`, clamped
+    /// to 0.2 - 2.  It scales `FadeStartDistance` and `FadeEndDistance` only;
+    /// the font-scale distances are not affected.
+    float fadeMul = 1.0f;
     float subLineMul = 1.0f;   ///< Title/info/level/badge alpha multiplier [0,1]
     bool hideNeutral = false;  ///< Hide neutral + ally NPC plates entirely
     int priority = 0;          ///< Highest-priority match wins
 
-    /// True once any key parsed inside this section.  Index gaps in
-    /// [RegisterN] numbering back-fill with defaults whose empty `When`
-    /// would otherwise match every scene and shadow the real register on
-    /// priority ties -- unconfigured entries never match.
+    /// True once any key parsed inside this section.  A gap in the RegisterN
+    /// numbering back-fills with default entries whose empty `When` would
+    /// otherwise match every scene and shadow a real register on a priority
+    /// tie, so an unconfigured entry never matches.
     bool configured = false;
 };
 
-/// Register globals (the profiles themselves live in Registers()).
+/**
+ * @struct RegisterSettings
+ * @brief Global controls for context-conditional setting profiles.
+
+ * *
+ * `Registers` stores the profiles.
+ */
 struct RegisterSettings
 {
     bool Enabled = true;          ///< Master toggle for the register system
@@ -389,19 +575,38 @@ std::vector<SpecialTitleDefinition>& SpecialTitles();  ///< Special title overri
 std::vector<HonorificDefinition>& Honorifics();        ///< Faction-driven honorific titles
 std::vector<RegisterDefinition>& Registers();          ///< Context-conditional profiles
 
-/// Distance and visibility fade/scale settings.
+/**
+ * @struct DistanceSettings
+ * @brief Distance limits for visibility fading and text scaling.
+
+ * *
+ * Each distance is in Skyrim game units. The fade envelope and scan cutoff use the distance
+ *
+ * from the player to the actor. The scale envelope is evaluated with the player distance and
+ * the
+ * camera distance. The smaller result applies. `ClampAndValidate` raises each end
+ * distance to at
+ * least its start distance plus one, so an envelope cannot collapse.
+ */
 struct DistanceSettings
 {
     float FadeStartDistance = 200.0f;   ///< Distance where fade begins
     float FadeEndDistance = 2500.0f;    ///< Distance where fully transparent
     float ScaleStartDistance = 200.0f;  ///< Distance where font size scaling begins
     float ScaleEndDistance = 2500.0f;   ///< Distance where minimum font size is reached
-    float MinimumScale = .1f;           ///< Smallest font size multiplier
-    float MaxScanDistance = 3000.0f;    ///< Maximum actor scan distance
+    float MinimumScale = .1f;           ///< Smallest font size multiplier, clamped to 0.01 - 5
+    /// Actor scan cutoff on the game thread, measured from the player.  An actor
+    /// beyond it gets no plate and no later setting restores one.  The Deck
+    /// crosshair target is the exception: it is injected past the cutoff as a
+    /// capture-only entry that draws nothing.
+    float MaxScanDistance = 3000.0f;
 };
 DistanceSettings& Distance();
 
-/// Occlusion culling settings.
+/**
+ * @struct OcclusionSettings
+ * @brief Settings for line-of-sight occlusion culling.
+ */
 struct OcclusionSettings
 {
     bool Enabled = true;      ///< Enable LOS-based occlusion
@@ -410,16 +615,29 @@ struct OcclusionSettings
 };
 OcclusionSettings& Occlusion();
 
-/// Shadow offsets, segment padding, and outline settings.
+/**
+ * @struct ShadowOutlineSettings
+ * @brief Settings for text shadows and outlines.
+ *
+ *
+ * Offsets, widths, and radii are in pixels at full text scale. The renderer scales them with
+ * the
+ * plate.
+ */
 struct ShadowOutlineSettings
 {
     float TitleShadowOffsetX = 2.0f;  ///< Title shadow X offset in pixels
     float TitleShadowOffsetY = 2.0f;  ///< Title shadow Y offset in pixels
     float MainShadowOffsetX = 4.0f;   ///< Main text shadow X offset
     float MainShadowOffsetY = 4.0f;   ///< Main text shadow Y offset
-    float OutlineWidthMin = 2.0f;     ///< Base outline width
-    float OutlineWidthMax = 2.5f;     ///< Additional width for high tiers
-    bool FastOutlines = false;        ///< Use 4-dir outlines instead of 8-dir
+    /// First summand of the base outline width, in pixels.
+    float OutlineWidthMin = 2.0f;
+    /// Second summand of the base outline width, in pixels.  There is no tier
+    /// dependence: every plate uses `OutlineWidthMin + OutlineWidthMax`.
+    /// `ClampAndValidate()` raises this to `OutlineWidthMin` when it is lower,
+    /// which keeps the pair ordered even though both terms are summed.
+    float OutlineWidthMax = 2.5f;
+    bool FastOutlines = false;  ///< Use 4-dir outlines instead of 8-dir
 
     // Outline Glow (white halo behind outline)
     bool OutlineGlowEnabled = false;   ///< Enable white glow behind text outline
@@ -443,7 +661,7 @@ struct ShadowOutlineSettings
     float OutlineColorTint = .0f;  ///< Tier-color tint for outlines 0-0.25
     float ShadowColorTint = .0f;   ///< Tier-color tint for shadows 0-0.25
 
-    // Soft directional drop-shadow (feathered; replaces the hard offset shadow)
+    // Soft directional drop-shadow (feathered; used instead of the hard offset shadow)
     bool SoftShadowEnabled = false;   ///< Use a soft directional shadow instead of a hard offset
     float SoftShadowDistance = 4.0f;  ///< Offset distance along the cast angle (pixels)
     float SoftShadowSoftness = 3.0f;  ///< Feather/blur radius of the shadow disc (pixels)
@@ -453,18 +671,29 @@ struct ShadowOutlineSettings
 };
 ShadowOutlineSettings& ShadowOutline();
 
-/// Glow effect settings.
+/**
+ * @struct GlowSettings
+ * @brief Settings for text glow and color-divide effects.
+ */
 struct GlowSettings
 {
-    bool Enabled = false;      ///< Enable glow effect
-    float Radius = 4.0f;       ///< Glow spread in pixels
-    float Intensity = .5f;     ///< Glow brightness 0-1
-    int Samples = 8;           ///< Quality samples 1-64 (recommended: 8-16)
-    float DivideStrength = 0;  ///< Color-divide blend 0-1 (0 = additive glow, 1 = full divide)
+    bool Enabled = false;   ///< Enable glow effect
+    float Radius = 4.0f;    ///< Glow spread in pixels
+    float Intensity = .5f;  ///< Glow brightness 0-1
+    int Samples = 8;        ///< Quality samples 1-64 (recommended: 8-16)
+    /// Color-divide blend, INI key `GlowDivideStrength`, clamped to 0 - 1.
+    /// 0 disables the divide pass; any value above 0 enables it, weighted per
+    /// pixel by `smoothstep(0.10, 0.25, luma)`, so dark outlines and shadows
+    /// still composite normally.  The pass is independent of `EnableGlow`, and
+    /// it degrades to a no-op when TextPostProcess is not initialized.
+    float DivideStrength = 0;
 };
 GlowSettings& Glow();
 
-/// Shine overlay effect settings (static top-edge highlight).
+/**
+ * @struct ShineSettings
+ * @brief Settings for the static top-edge shine overlay.
+ */
 struct ShineSettings
 {
     bool Enabled = false;    ///< Enable shine overlay on text
@@ -475,7 +704,10 @@ struct ShineSettings
 };
 ShineSettings& Shine();
 
-/// Typewriter reveal effect settings.
+/**
+ * @struct TypewriterSettings
+ * @brief Settings for the typewriter reveal effect.
+ */
 struct TypewriterSettings
 {
     bool Enabled = false;  ///< Enable typewriter reveal
@@ -484,44 +716,51 @@ struct TypewriterSettings
 };
 TypewriterSettings& Typewriter();
 
-/// Side ornament settings.
+/**
+ * @struct OrnamentSettings
+ * @brief Settings for side ornaments.
+ */
 struct OrnamentSettings
 {
     bool Enabled = true;     ///< Enable side ornaments
     float Scale = 1.0f;      ///< Size multiplier
     float Spacing = 3.0f;    ///< Distance from text edges
     std::string FontPath;    ///< Path to ornament font (TTF/OTF)
-    float FontSize = 64.0f;  ///< Ornament font size in points
+    float FontSize = 64.0f;  ///< Ornament font size in pixels (ImGui size_pixels)
     bool AnchorToMainLine =
-        true;             ///< Anchor ornaments to main text line instead of nameplate center
-    float OffsetY = .0f;  ///< Manual vertical nudge in pixels (negative = up),
-                          ///< scaled with text size, applied after anchoring
+        true;  ///< Anchor ornaments to main text line instead of nameplate center
+    /// Manual vertical nudge in pixels (negative = up),
+    /// scaled with text size, applied after anchoring
+    float OffsetY = .0f;
 };
 OrnamentSettings& Ornament();
 
 /**
- * Visual styles for particle aura effects.
+ * @enum ParticleStyle
+ * @brief Visual styles for particle aura effects.
+ * @ingroup Settings
+ *
+ * @note The ordinal is significant: it indexes the per-type sprite set in
+ * `ParticleTextures`. The single source of truth linking each style to its
+ * INI token is `kParticleStyleTokens` below - every dependent table
+ * static_asserts against `kParticleStyleCount`.
  *
  * @see ParticleSettings, TextEffects::DrawParticleAura
  */
-/// @note The ordinal is significant: it indexes the per-type sprite set in
-/// `ParticleTextures`. The single source of truth linking each style to its
-/// INI token / sprite filename base is `kParticleStyleTokens` below -- every
-/// dependent table static_asserts against `kParticleStyleCount`.
 enum class ParticleStyle
 {
     Firefly,        ///< Slow wandering glow that flickers in place
     Snow,           ///< Snowflakes drifting around a broad slow orbit
     Smoke,          ///< Rising, expanding, fading puffs
     Spark,          ///< Orbiting embers that periodically flare outward hot
-    Wisp,           ///< Serpentine ethereal trails
+    Wisp,           ///< Serpentine trails
     Leaf,           ///< Orbiting leaves with in/out drift and fluttering tumble
     Aurora,         ///< Wavy horizontal shimmer band
     CherryBlossom,  ///< Orbiting petals with a gentle bob and slow spin
     Dust,           ///< Very slow floating motes
     Mote,           ///< Soft glowing motes that gently drift and pulse
-    // -- 2026-07 sprite expansion. Appended so existing ordinals stay stable. --
-    Arcane,         ///< Stately orbiting rune, slow spin, glow pulse
+    // --- Extra sprite styles. Append new styles here so existing ordinals stay stable. --
+    Arcane,         ///< Orbiting rune, slow spin, glow pulse
     Ash,            ///< Slow-falling embers with a fading glow pulse
     Bat,            ///< Bats circling the plate with swooping flight (flap strip)
     Bubble,         ///< Rising wobbling bubbles that pop at the top
@@ -539,7 +778,7 @@ enum class ParticleStyle
     Hex,            ///< Slow orbiting hex marks with green flame flicker
     Ink,            ///< Matte ink marks creeping around a low slow orbit
     Moon,           ///< A single slow crescent arcing across the top band
-    Planet,         ///< A single majestic ringed planet on a slow deep orbit
+    Planet,         ///< A single ringed planet on a slow deep orbit
     Pollen,         ///< Air-borne golden specks on a very slow sway-fall
     Soul,           ///< Ghostly wisps rising and fading out
     Steam,          ///< Brisk narrow rising vapor that expands
@@ -554,12 +793,27 @@ enum class ParticleStyle
     Sand            ///< Wind-blown grains gusting across the lower band
 };
 
-/// Canonical style -> token mapping. The token is simultaneously the
-/// case-insensitive `ParticleTypes` INI name and the sprite filename base in
-/// `Data/SKSE/Plugins/glyph/particles/` (`<token>.png`, `<token>2.png`,
-/// `<token>_strip.png`, ...). Order must match the enum; dependent tables
-/// (`ParticleTextures`, `RendererEffects`, the motion spec table) size-check
-/// against `kParticleStyleCount`.
+/**
+ * @struct ParticleStyleToken
+ * @brief Canonical mapping from a particle style to its
+ * configuration token.
+ *
+ * The token is the case-insensitive `ParticleTypes` INI name and the
+ * lookup key in the
+ * `particles` map in `glyph.project.json`. The map resolves the token to one
+ * or more
+ * obfuscated PNG paths under `Data/SKSE/Plugins/glyph/particles/`. Sprite files use
+ * GUID
+ * names, so a file named after the token does not load. Image dimensions determine
+ * flipbook
+ * frame counts. There is no `_strip` suffix convention.
+ *
+ * The order must match
+ * `ParticleStyle`. Dependent tables in `ParticleTextures`,
+ * `RendererEffects`, and the motion
+ * specification check their size against
+ * `kParticleStyleCount`.
+ */
 struct ParticleStyleToken
 {
     ParticleStyle style;
@@ -624,12 +878,28 @@ static_assert(
     }(),
     "kParticleStyleTokens rows must be listed in ParticleStyle enum order");
 
-/// Particle aura settings.
-///
-/// Which particle styles actually render is determined per tier via
-/// `TierDefinition::particleTypes` (e.g. `ParticleTypes = Snow,Firefly`).
-/// `Enabled` is the master toggle; a tier with `ParticleTypes = None` (or
-/// empty) renders no particles regardless of this setting.
+/**
+ * @struct ParticleSettings
+ * @brief Settings for the particle aura.
+ *
+ *
+ * `TierDefinition::particleTypes` selects the styles for each tier. `Enabled` is the master
+ *
+ * switch. A tier with an empty value or `ParticleTypes = None` renders no particles.
+ *
+ * Tier
+ * particle auras apply only to the player, as the ornament gate does. An NPC plate shows
+ *
+ * particles only through a matched `SpecialTitleDefinition` with `ForceParticles = 1`.
+ * Other
+ * combinations of `ParticleTypes`, `ParticleCount`, and `EnableParticleAura` do not
+ * enable a
+ * tier aura for an NPC.
+ *
+ * When `EnableLOD` is true, particles stop after
+ * `Visual().LODMidDistance` plus
+ * `LODTransitionRange`.
+ */
 struct ParticleSettings
 {
     bool Enabled = true;              ///< Master enable for particle aura
@@ -648,19 +918,53 @@ struct ParticleSettings
 };
 ParticleSettings& Particle();
 
-/// Display behavior settings.
+/**
+ * @struct DisplaySettings
+ * @brief Settings for display placement and actor limits.
+ */
 struct DisplaySettings
 {
     float VerticalOffset = 8.0f;      ///< Height above actor's head in game units
-    float HorizontalOffset = -10.0f;  ///< Screen-space X correction in pixels at full scale
+    float HorizontalOffset = -10.0f;  ///< Screen-space X correction at full scale
     bool HidePlayer = false;          ///< Hide player's own nameplate
     bool HideCreatures = false;       ///< Hide nameplates for non-NPC actors
-    int ReloadKey = 0;                ///< Virtual key code for hot reload (0 = disabled)
+    int MaxPlates = RenderConstants::DEFAULT_MAX_PLATES;  ///< Visible nameplate limit
+    /// Upper bound on the actor handles the cheap distance pass inspects per
+    /// snapshot.  `ClampAndValidate()` raises it to at least MaxPlates, so the
+    /// scan can always fill every plate slot.
+    int MaxScanActors = RenderConstants::DEFAULT_MAX_SCAN_ACTORS;
+    int ReloadKey = 0;                ///< Hot-reload virtual key (0 or negative = disabled)
     bool EnableDebugOverlay = false;  ///< Show performance/cache overlay
 };
 DisplaySettings& Display();
 
-/// Animation speed and color/effect intensity settings.
+/**
+ * @struct DeckSettings
+ * @brief Settings for collectible character-card capture.
+ */
+struct DeckSettings
+{
+    bool Enabled = true;  ///< Enable one-key character card capture
+    /// Win32 virtual key code that captures a card; 119 is F8.  0 or a negative
+    /// value disables capture, as `ReloadKey` does.
+    int Key = 119;
+    std::string OutputFolder =
+        "Data/SKSE/Plugins/glyph/cards";  ///< Folder where generated PNG cards are written
+    int CardWidth = 750;                  ///< Output card width in pixels
+    int CardHeight = 1050;                ///< Output card height in pixels
+    /// Fallback pick radius in pixels around screen center.  It is used only
+    /// when the game's own crosshair pick returns no actor, which happens for
+    /// distant targets and some third-person camera angles.
+    int TargetRadius = 220;
+    bool PlayerFallback = true;  ///< Capture the player when no actor is targeted
+    bool RarityRolls = true;     ///< Let unique actors roll collectible rarity upgrades
+};
+DeckSettings& Deck();
+
+/**
+ * @struct AnimColorSettings
+ * @brief Settings for animation timing and color intensity.
+ */
 struct AnimColorSettings
 {
     float AlphaSettleTime = .46f;     ///< Alpha settle time in seconds
@@ -671,19 +975,25 @@ struct AnimColorSettings
 };
 AnimColorSettings& AnimColor();
 
-/// Font path and size settings.
+/**
+ * @struct FontSettings
+ * @brief Settings for font paths and sizes.
+ */
 struct FontSettings
 {
     std::string NameFontPath;     ///< Path to name font TTF file
-    float NameFontSize = 122.0f;  ///< Name font size in points
+    float NameFontSize = 122.0f;  ///< Name font size in pixels (ImGui size_pixels)
     std::string LevelFontPath;    ///< Path to level font TTF file
-    float LevelFontSize = 61.0f;  ///< Level font size in points
+    float LevelFontSize = 61.0f;  ///< Level font size in pixels (ImGui size_pixels)
     std::string TitleFontPath;    ///< Path to title font TTF file
-    float TitleFontSize = 42.0f;  ///< Title font size in points
+    float TitleFontSize = 42.0f;  ///< Title font size in pixels (ImGui size_pixels)
 };
 FontSettings& Font();
 
-/// Entrance/exit transition animation settings.
+/**
+ * @struct TransitionSettings
+ * @brief Settings for entrance and exit transitions.
+ */
 struct TransitionSettings
 {
     bool EnableEntrance = false;    ///< Enable pop-in/slide entrance animation
@@ -692,18 +1002,23 @@ struct TransitionSettings
     bool EnableExit = false;        ///< Enable exit animation
     float ExitDuration = .20f;      ///< Exit animation duration in seconds
 
-    // Roll Call -- staggered entrance cascade
-    // When several plates begin their entrance on the same frame (overlay
-    // wake after combat/menus/loads, hot reload, a group entering range),
-    // each successive plate waits one step longer, nearest first, so the
-    // scene introduces itself as a quiet near-to-far wave instead of a
-    // simultaneous pop.  Step 0 disables staggering.
+    // Staggered entrance cascade.  When several plates begin their entrance on
+    // the same frame (overlay wake after combat, menus or loads, hot reload, a
+    // group entering range), each successive plate waits one step longer,
+    // nearest first, so they arrive as a near-to-far wave instead of together.
+    // Step 0 disables staggering.
     float EntranceStaggerStep = .06f;  ///< Delay between successive entrances (s)
     float EntranceStaggerMax = .8f;    ///< Ceiling for any single plate's delay (s)
 };
 TransitionSettings& Transition();
 
-/// Visual polish settings, encapsulated to avoid non-const globals.
+/**
+ * @struct VisualSettings
+ * @brief Settings for optional visual adjustments.
+ *
+ * The struct
+ * keeps these values out of mutable global variables.
+ */
 struct VisualSettings
 {
     // Distance-Based Outline
@@ -752,10 +1067,13 @@ struct VisualSettings
 VisualSettings& Visual();
 
 /**
- * Configurable label strings and thresholds for the contextual nameplate tokens
- * (`%r` relationship, `%d` level delta, `%c` creature type).
+ * @struct LabelSettings
+ * @brief Label strings and thresholds for the contextual nameplate tokens.
+ * @ingroup Settings
  *
- * Empty strings render as nothing -- pair with a trailing `?` segment marker in
+ * Covers `%r` (relationship), `%d` (level delta) and `%c` (creature type).
+ *
+ * Empty strings render as nothing - pair with a trailing `?` segment marker in
  * `Format` / `InfoFormat` to drop the segment entirely when its tokens expand
  * to whitespace.
  *
@@ -790,16 +1108,28 @@ struct LabelSettings
 LabelSettings& Labels();
 
 /**
- * Status icon badge settings.
+ * @struct IconSettings
+ * @brief Status icon badge settings.
+ * @ingroup Settings
  *
- * Renders the contextual facts (relationship, level delta, creature kind)
- * as a compact strip of icon indicators below the name/level row instead of
- * the text-based info row.  Icons are duotone SVGs (Font Awesome naming)
- * rasterized at load time from `IconFolder`; each `Icon*` value is a file
- * name without the `.svg` extension.  Empty names hide that badge.
+ * Draws the contextual facts (relationship, level delta, creature kind) as a
+ * strip of icons below the name/level row, in place of the text info row.
+ * Icons are duotone SVGs (Font Awesome naming) rasterized at load time from
+ * `IconFolder`; each `Icon*` value is a file name without the `.svg`
+ * extension.  An empty name hides that badge.
  *
  * Colors are comma-separated RGB floats in [0,1]; the `*Color` members are
  * derived from the string forms in `ClampAndValidate()`.
+ *
+ * A member's INI key is not its member name.  Most badge members take an `Icon`
+ * prefix and drop the `Icon` / `ColorStr` suffix: `Folder` is `IconFolder`,
+ * `FollowerIcon` is `IconFollower`, `FollowerColorStr` is `IconFollowerColor`,
+ * `MutedAlpha` is `IconMutedAlpha`, `Opacity` is `IconOpacity`.  The tier-emblem
+ * and player-lighting members break that pattern and take no prefix at all:
+ * `TierBadgeImages`, `TierBadgeScale` and `PlayerStripBedAlpha` are spelled
+ * exactly as named here, and a `*ColorStr` member among them only drops the
+ * `Str`, so `EmblemBacklightColorStr` is `EmblemBacklightColor`.  `kSettings` in
+ * `Settings.cpp` is the authority for every mapping.
  *
  * @note The bundled duotone set is Font Awesome Pro (licensed per-seat) and
  *       is excluded from the public repository.  An empty `IconFolder`
@@ -812,7 +1142,7 @@ struct IconSettings
     float Scale = 1.0f;       ///< Badge size relative to the level font size
     bool DeadlyPulse = true;  ///< Subtle alpha pulse on the Deadly skull
 
-    // Icon names (SVG file names without extension -- the INI surface)
+    // Icon names (SVG file names without extension - the INI surface)
     std::string FollowerIcon = "shield-halved";
     std::string AllyIcon = "handshake";
     std::string HostileIcon = "skull-crossbones";
@@ -824,7 +1154,7 @@ struct IconSettings
     std::string DaedraIcon = "fire";
     std::string DragonIcon = "dragon";
 
-    // Badge colors (comma-separated RGB strings -- the INI surface)
+    // Badge colors (comma-separated RGB strings - the INI surface)
     std::string FollowerColorStr = "0.46, 0.68, 0.84";
     std::string AllyColorStr = "0.52, 0.74, 0.50";
     std::string HostileColorStr = "0.86, 0.36, 0.32";
@@ -842,13 +1172,12 @@ struct IconSettings
     Color3 DeadlyColor;
     Color3 CreatureColor;
 
-    // Expanded always-on slots (more NPC + player indicators)
-    // New status slots render alongside the original three.  Neutral/inactive
-    // states show muted (MutedColor, dimmed via MutedAlpha + desaturated via
-    // MutedDesat at draw time); active states show lit in their own color.
+    // Always-on slots: further NPC and player indicators drawn alongside the
+    // relationship, creature and threat badges.  A neutral or inactive state
+    // draws muted (MutedColor, dimmed by MutedAlpha and desaturated by
+    // MutedDesat at draw time); an active state draws lit in its own color.
     // Set any `*Icon` empty to hide that state; toggle a whole slot via its
     // `*Enabled`.  Icon names require matching SVGs in the IconFolder.
-    // Always-on neutral states (previously blank) + new NPC categories.
     std::string NeutralIcon = "circle";  ///< muted relationship
     std::string HumanoidIcon = "user";   ///< muted creature
     std::string EvenIcon = "equals";     ///< muted threat
@@ -869,45 +1198,49 @@ struct IconSettings
     std::string NormalWeightIcon = "feather";  ///< muted
     std::string WantedIcon = "gavel";
     std::string BountyClearIcon = "scale-balanced";  ///< muted
-    // Player tier-band prestige badge (low / mid / high thirds of the ladder).
+    // Actor rank badge (low / mid / high thirds of the ladder).
     std::string TierLowIcon = "medal";
     std::string TierMidIcon = "gem";
     std::string TierHighIcon = "crown";
-    // Full-color prestige emblem images for the tier badge.  When enabled and at
-    // least one emblem loads, they replace the medal/gem/crown icons above with
-    // a top-weighted rank climb (see BadgeTextures::InitializeTierImages).
-    // Emblems are PNGs named 1.png, 2.png, ... in TierBadgeFolder.
+    // Full-color emblem images for the tier badge.  When enabled and at least
+    // one emblem loads, they take the place of the medal/gem/crown icons above
+    // with a top-weighted rank climb.  Emblems come from glyph.project.json's
+    // tierBadges list, in rank order; the files are GUID-named.  See
+    // BadgeTextures::InitializeTierImages.
     bool TierBadgeImages = true;
+    /// Unused emblem folder.  Nothing reads this value; the emblem paths come
+    /// from the project manifest.  Changing it has no effect.
     std::string TierBadgeFolder = "Data/SKSE/Plugins/glyph/badges";
     float TierBadgeGamma = 1.8f;  ///< Emblem->tier top-weighting (>1 = high emblems rarer)
     float TierBadgeScale = 1.7f;  ///< Emblem size as a multiple of the status-icon size
 
-    // --- Player "Seat of Light" block elevation (player-only) ---
-    // Strip light bed: a soft breathing pool behind the player's icon strip.
+    // --- Player-only lighting layers ---
+    // Strip light bed: additive discs behind the player's icon strip, with a
+    // slow alpha breathe.
     bool PlayerStripBedEnabled = true;
     float PlayerStripBedAlpha = 0.10f;          ///< Per-disc additive alpha (overlap sums)
     float PlayerStripBedSize = 2.6f;            ///< Disc EDGE as a multiple of row height
     float PlayerStripBedBreatheHz = 0.14f;      ///< Bed breathe frequency (alpha only)
     std::string PlayerStripBedColorStr;         ///< Empty => derive near-neutral from Name
     std::optional<Color3> PlayerStripBedColor;  ///< Empty => derive at draw time
-    // Emblem backlight: one true radial disc replacing the ghosted art copies.
+    // Emblem backlight: a single radial disc behind the tier emblem.
     bool EmblemBacklightEnabled = true;
     float EmblemBacklightSize = 2.6f;            ///< Disc EDGE as a multiple of emblem edge
     float EmblemBacklightAlpha = 0.55f;          ///< Peak backlight alpha (x breathe)
     float EmblemBacklightBreatheHz = 0.167f;     ///< Backlight breathe freq (=> sin(t*1.05))
-    float EmblemCrispAlpha = 0.92f;              ///< Crisp emblem alpha on the backlight path
+    float EmblemCrispAlpha = 0.95f;              ///< Crisp emblem alpha on all draw paths
     std::string EmblemBacklightColorStr;         ///< Empty => derive near-neutral tier accent
     std::optional<Color3> EmblemBacklightColor;  ///< Empty => derive at draw time
 
-    // --- B "Struck Metal" optional layers (default ON, subtle values) ---
-    // Player resting-icon emboss: warm top rim + carved bottom shadow.
+    // --- Optional emboss layers (enabled by default, low values) ---
+    // Player resting-icon emboss: warm top rim plus carved bottom shadow.
     bool PlayerRimLightEnabled = true;
     float PlayerRimAlpha = 0.22f;    ///< Top-rim highlight alpha (x muted alpha)
     float PlayerCarveAlpha = 0.26f;  ///< Bottom carve-shadow alpha (x muted alpha)
     float PlayerRimOffset = 1.0f;    ///< Emboss offset in px (scaled by text size)
     std::string PlayerRimColorStr;   ///< Empty => derive warm-white from Name
     std::optional<Color3> PlayerRimColor;
-    // Emblem directional lights: warm KEY above + cool FILL below the backlight.
+    // Emblem directional lights: warm key above and cool fill below the backlight.
     bool EmblemKeyFillEnabled = true;
     float EmblemKeyAlpha = 0.35f;   ///< Key (top) light alpha (x breathe)
     float EmblemFillAlpha = 0.15f;  ///< Fill (bottom) bounce alpha (x breathe)
@@ -929,13 +1262,13 @@ struct IconSettings
     std::string SneakDetectedColorStr = "0.86, 0.36, 0.32";
     std::string EncumberedColorStr = "0.82, 0.64, 0.40";
     std::string WantedColorStr = "0.84, 0.34, 0.30";
-    // Tier-band prestige colors: bronze -> silver-blue -> calm gold, in the
-    // same muted-saturation family as the other lit colors.
+    // Tier-band colors: bronze -> silver-blue -> gold, at the same low
+    // saturation as the other lit colors.
     std::string TierLowColorStr = "0.70, 0.62, 0.52";
     std::string TierMidColorStr = "0.62, 0.70, 0.80";
     std::string TierHighColorStr = "0.86, 0.74, 0.46";
-    // Resting-state colors: each "muted" slot carries its own calm hue so the
-    // always-on strip reads as a colored spectrum rather than uniform grey.
+    // Resting-state colors: each muted slot carries its own hue, so the
+    // always-on strip is a colored spectrum rather than uniform grey.
     std::string NeutralColorStr = "0.56, 0.62, 0.70";       ///< neutral relationship
     std::string HumanoidColorStr = "0.74, 0.68, 0.58";      ///< humanoid creature
     std::string CommonerColorStr = "0.60, 0.68, 0.54";      ///< commoner role
@@ -945,7 +1278,7 @@ struct IconSettings
     std::string SneakOffColorStr = "0.64, 0.68, 0.60";      ///< sneak off (player)
     std::string NormalWeightColorStr = "0.64, 0.76, 0.70";  ///< normal weight (player)
     std::string BountyClearColorStr = "0.50, 0.70, 0.68";   ///< bounty clear (player)
-    std::string MutedColorStr = "0.62, 0.64, 0.68";         ///< deprecated shared tint (unused)
+    std::string MutedColorStr = "0.62, 0.64, 0.68";         ///< shared tint, unused
 
     Color3 GuardColor;
     Color3 MerchantColor;
@@ -984,38 +1317,40 @@ struct IconSettings
     bool PlayerCombatEnabled = true;
     bool EncumberedEnabled = true;
     bool BountyEnabled = true;
-    bool TierEnabled = true;  ///< player tier-band prestige badge
+    bool TierEnabled = true;  ///< rank badge for player and NPCs
 
-    // Lit-badge opacity gain, multiplied into the icon tint alpha (clamped to
-    // 1.0 at draw). Raises overall icon visibility; muted slots use MutedAlpha.
-    float Opacity = 1.15f;
+    // Status-row opacity multiplier. The draw path clamps the result to 1.0.
+    // Resting slots then use MutedAlpha as an optional multiplier.
+    float Opacity = 0.92f;
 
     // Resting styling: alpha multiplier and desaturation strength [0,1].
-    // Lower desat keeps each resting slot's hue; alpha keeps it subordinate.
-    float MutedAlpha = 0.45f;
+    // A lower desat keeps more of each resting slot's own hue.
+    float MutedAlpha = 1.0f;
     float MutedDesat = 0.18f;
 };
 IconSettings& Icons();
 
 /**
- * NPC nameplate text colors.
+ * @struct NpcColorSettings
+ * @brief NPC nameplate support-layer colors.
+ * @ingroup Settings
  *
- * NPCs render flat, white-leaning text; the tier palettes apply only to the
- * player (and special titles).  The name color is keyed by the actor's
- * relationship to the player: hostiles lean warm, teammates lean cool, and
- * everyone else -- including merely talkable civilians -- stays neutral.
+ * NPC name fill stays white; title and level fill reuse the matched tier's
+ * player-level gradient.  These colors tint only the outline, shadow and glow
+ * support layers: hostiles warm, teammates cool, everyone else - including
+ * civilians that can be talked to - neutral.
  *
  * Colors are comma-separated RGB floats in [0,1]; the `*Color` members are
  * derived from the string forms in `ClampAndValidate()`.
  */
 struct NpcColorSettings
 {
-    // Colors (comma-separated RGB strings -- the INI surface)
-    std::string NeutralColorStr = "1.0, 1.0, 1.0";     ///< Neutral + talkable civilians
-    std::string HostileColorStr = "1.0, 0.72, 0.68";   ///< Slight warm lean for hostiles
-    std::string FollowerColorStr = "0.72, 0.84, 1.0";  ///< Slight cool lean for teammates
-    std::string LevelColorStr = "0.82, 0.84, 0.88";    ///< Dimmed silver level readout
-    std::string TitleColorStr = "0.92, 0.93, 0.95";    ///< Soft white title text
+    // Colors (comma-separated RGB strings - the INI surface)
+    std::string NeutralColorStr = "1.0, 1.0, 1.0";     ///< Neutral name support
+    std::string HostileColorStr = "1.0, 0.72, 0.68";   ///< Hostile name support
+    std::string FollowerColorStr = "0.72, 0.84, 1.0";  ///< Follower name support
+    std::string LevelColorStr = "0.82, 0.84, 0.88";    ///< Level support tint
+    std::string TitleColorStr = "0.92, 0.93, 0.95";    ///< Title support tint
 
     // Derived values (computed in ClampAndValidate, not INI keys)
     Color3 NeutralColor;
@@ -1027,42 +1362,99 @@ struct NpcColorSettings
 NpcColorSettings& NpcColors();
 
 /**
- * Focus-target expanded-nameplate settings.
+ * @struct FocusSettings
+ * @brief Focus-target expanded-nameplate settings.
+ * @ingroup Settings
  *
- * When `Enabled`, the render thread picks at most one actor per frame --
- * the one whose direction from the camera lies inside a cone around
- * camera-forward with the smallest angular offset.  That actor renders
- * the full title + main + info row stack; every other actor renders
- * only the main line at a reduced alpha (`AmbientDimFactor`).
+ * When `Enabled`, the render thread picks at most one actor per frame: the one
+ * whose direction from the camera lies inside a cone around camera-forward
+ * with the smallest angular offset.  That actor draws the full title + main +
+ * info row stack; every other actor draws only the main line, at a reduced
+ * alpha (`AmbientDimFactor`).
  *
- * The player is never picked as the focus target and is never dimmed.
- * Transitions between ambient and focused are smoothed via a per-actor
- * value driven by `Renderer::ExpApproachAlpha` with `SettleTime`.
+ * The player is never picked as the focus target and is never dimmed.  Dead
+ * actors and card-capture-only entries are also skipped when picking.
  *
- * @see Renderer::SelectFocusedActor, RendererInternal::ActorCache::focusSmooth
+ * An actor the camera ray already resolves to - the Graffito raycast target,
+ * or the game's crosshair target when Graffito is off - counts as focused for
+ * that frame and jumps straight to full content, without the crossfade.
+ *
+ * Transitions between ambient and focused are smoothed by a per-actor value
+ * driven by `Renderer::ExpApproachAlpha` with `SettleTime`.
+ *
+ * @see Renderer::SelectFocusedActor, Renderer::ActorCache::focusSmooth
  */
 struct FocusSettings
 {
-    bool Enabled = false;           ///< Master toggle (off = legacy behavior)
+    bool Enabled = false;           ///< Master toggle (off = no focus pick, no dimming)
     float ConeAngleDegrees = 8.0f;  ///< Cone half-angle for selection [0.5, 45]
-    float MaxDistance = .0f;        ///< Max world distance; 0 = reuse Distance().MaxScanDistance
+    /// Max world distance for focus selection; 0 = no additional limit.
+    /// Candidates are already bounded by `Distance().MaxScanDistance`, so a
+    /// non-zero value only shrinks the cone further.
+    float MaxDistance = .0f;
     float AmbientDimFactor = .55f;  ///< Alpha multiplier for non-focused actors [0.05, 1]
     float SettleTime = .25f;        ///< Seconds for focusSmooth crossfade [0, 2]
     bool IgnoreOccluded = true;     ///< Skip occluded actors when picking focus
 };
 FocusSettings& Focus();
 
+// clang-format off
 /**
- * One Voice Per Actor -- TrueHUD / moreHUD deconfliction.
+ * @struct GraffitoSettings
+ * @brief Perspective-correct text on an actor-bound world plane.
+ * @ingroup Settings
  *
- * When TrueHUD floats an info/boss bar over an actor, glyph yields that
- * actor's plate (fading it to `TrueHUDYieldAlpha`); when moreHUD's
- * crosshair readout already shows the target's level, glyph drops its own
- * level segment for that actor.  Both handshakes are automatic -- absent
- * mods simply leave the behavior off.
+ * NPC plates use actor-aligned geometry instead of rotating toward the camera.
+ * With `FolioEnabled`, the full inscription stays on the front, its flat
+ * glyphs are built into shallow relief, and side and rear views resolve into
+ * compact triangular facets.  With `FolioEnabled` off, the plate is a single
+ * sheet with front, seam and mirrored-bleed states.
+ *
+ * `Scale` multiplies the renderer's calibrated physical text size.
+ * `PlayerScale` scales the whole player plate uniformly after that shared
+ * calibration, so every authored layout ratio is preserved.
+ * `ForwardOffset` moves the plane ahead of the actor in world units.
+ * When `FolioEnabled` is off, and while the folio collapses to a single sheet,
+ * `FacingFadeDegrees` is the angular width of the material transition around
+ * edge-on; zero selects hard front/seam/back states.  `MaxDistance` limits the
+ * effect, with zero reusing the normal nameplate distance limit.
+ */
+struct GraffitoSettings
+{
+    bool Enabled = false;                 ///< Master toggle (off = billboard nameplates)
+    float Scale = 1.0f;                   ///< Physical text-size multiplier [0.25, 4]
+    float PlayerScale = .72f;             ///< Uniform player-only multiplier [0.25, 2]
+    float ForwardOffset = 4.0f;           ///< Plane offset along actor-forward [0, 32]
+    float FacingFadeDegrees = 15.0f;      ///< Single-sheet edge fade in degrees [0, 45]
+    float BacksideBleedAlpha = .12f;      ///< Single-sheet mirrored ink opacity [0, .25]
+    float EdgeSeamAlpha = .22f;           ///< Single-sheet edge-seam opacity [0, .4]
+    bool FolioEnabled = true;             ///< Relief front plus one side/rear head marker
+    float FolioReverseAlpha = .72f;       ///< Head-marker opacity from the rear [0, 1]
+    float FolioSpineAlpha = .88f;         ///< Head-marker opacity edge-on [0, 1]
+    float FolioDepth = 2.0f;              ///< Relief plane spacing in source pixels [0, 28]
+    float WrapDegrees = 55.0f;            ///< Total cylindrical arc across content [0, 140]
+    float FisheyeStrength = .62f;         ///< Text-row midpoint magnification [0, 1]
+    float LayerDepth = .0f;               ///< Role separation, fraction of view distance [0, .06]
+    float EdgeSheen = .14f;               ///< Grazing highlight strength on crowned wings [0, .4]
+    float OrientationSettleTime = .18f;   ///< Actor-plane orientation smoothing [0, 2] seconds
+    float MaxDistance = 1200.0f;          ///< Effect range; 0 = normal nameplate distance
+    bool FallenEpitaphEnabled = true;     ///< Hinge death-rite text onto the ground plane
+    float EpitaphGroundLift = 2.0f;       ///< Ground-plane lift against z-fighting [0, 16]
+};
+GraffitoSettings& Graffito();
+
+/**
+ * @struct CompatSettings
+ * @brief TrueHUD and moreHUD deconfliction.
+ *
+ * When TrueHUD floats an info or boss bar over an actor, that actor's plate
+ * fades to `TrueHUDYieldAlpha`; when moreHUD's crosshair readout already shows
+ * the target's level, the level segment is dropped for that actor.  Both
+ * checks are automatic, and stay inactive when the mods are absent.
  *
  * @see HudCompat
  */
+// clang-format on
 struct CompatSettings
 {
     bool YieldToTrueHUD = true;       ///< Yield plates to TrueHUD floating bars
@@ -1073,37 +1465,39 @@ struct CompatSettings
 CompatSettings& Compat();
 
 /**
- * Last Rites -- a one-shot death valediction.
+ * @struct DeathRiteSettings
+ * @brief One-shot death animation for a plate whose actor dies in view.
+ * @ingroup Settings
  *
- * A tracked actor that dies in view no longer pops out: the plate holds
- * perfectly still for a beat, its ink drains to ash, and the name takes a
- * creature-keyed farewell -- a mortal's gutters out and sinks, a draugr's
- * crumbles letter by letter, a dragon's sears bright before going dark.
- * Plays once per corpse, never for corpses first seen dead, and rites
- * pending while the overlay was suppressed (player combat) are cancelled
- * on wake rather than replayed stale.
+ * The plate holds position instead of popping out, its color drains toward
+ * ash, and the name plays a creature-keyed exit: a mortal's fades and sinks, a
+ * draugr's crumbles letter by letter, a dragon's flares bright and then goes
+ * dark.  It plays once per corpse, never for an actor first seen already dead,
+ * and an animation still pending while the overlay was suppressed (player in
+ * combat) is cancelled on wake rather than replayed.
  */
 struct DeathRiteSettings
 {
     bool Enabled = true;    ///< Master toggle
-    float Duration = 1.6f;  ///< Full rite length in seconds
+    float Duration = 1.6f;  ///< Full animation length in seconds
 };
 DeathRiteSettings& DeathRite();
 
 /**
- * The Quiet Frame -- camera-motion quieting.
+ * @struct QuietSettings
+ * @brief Camera-motion quieting.
+ * @ingroup Settings
  *
- * During fast camera pans nothing on screen is readable, so the overlay
- * exhales: sub-lines (title, info row, level, badges) fold away entirely
- * and names thin to a low-alpha trace.  When the camera settles the
- * information re-resolves in a damped cadence -- names first, sub-lines
- * breathing back after -- via an asymmetric envelope (fast attack toward
- * quiet, slow weighty release back).
+ * Text is unreadable during a fast camera pan, so the overlay reduces itself:
+ * sub-lines (title, info row, level, badges) are hidden entirely and names
+ * drop to a low alpha.  When the camera settles the content returns names
+ * first, sub-lines after, through an asymmetric envelope - fast attack into
+ * quiet, slow release back.
  *
  * Angular speed below `PanThresholdLo` leaves the overlay untouched; above
  * `PanThresholdHi` it is fully quiet; smoothstep in between.
  *
- * @see Renderer::UpdateQuietFrame, RendererState::quietName
+ * @see RendererState::quietName
  */
 struct QuietSettings
 {
@@ -1118,15 +1512,15 @@ struct QuietSettings
 QuietSettings& Quiet();
 
 /**
- * Candlelight Metering -- exposure-adaptive ink.
+ * @struct CandlelightSettings
+ * @brief Exposure-adaptive text brightness.
+ * @ingroup Settings
  *
- * The renderer meters the scene behind each plate like a film exposure
- * meter: over a bright snowfield the ink dims a touch; in a torchlit crypt
- * it lifts a few percent and picks up a whisper of the scene's warmth.
- * All adjustments are hard-capped (`Strength`) and smoothed per actor, so
- * the typography participates in the scene's lighting without ever calling
- * attention to itself.  Unsupported render setups disable the feature
- * silently (one log line, zero visual change).
+ * The renderer meters the scene behind each plate: over a bright background
+ * the text dims slightly, over a dark one it brightens slightly and picks up
+ * some of the scene's warmth.  Every adjustment is capped by `Strength` and
+ * smoothed per actor.  Render setups that cannot supply the measurement
+ * disable the feature silently: one log line, no visual change.
  */
 struct CandlelightSettings
 {
@@ -1138,15 +1532,17 @@ struct CandlelightSettings
 CandlelightSettings& Candlelight();
 
 /**
- * Cut by the World -- per-pixel depth occlusion.
+ * @struct DepthClipSettings
+ * @brief Per-pixel depth occlusion for nameplates.
+ * @ingroup Settings
  *
- * Plates are depth-tested per pixel against the game's own depth buffer, so
- * a name is physically sliced by a doorframe as an actor walks behind it
- * instead of the whole plate popping.  The soft feather hides the raw
- * intersection edge.  The coarse line-of-sight culling stays on regardless;
- * this is the fine, sub-plate truth layered on top.  Setups where the depth
- * buffer is unavailable (some ENB/upscaler stacks) fall back to LOS-only
- * occlusion automatically, with one log line.
+ * Line-of-sight culling can only show or hide a whole plate, so a plate pops
+ * at the moment sight breaks.  Plates are additionally depth-tested per pixel
+ * against the game's depth buffer, so geometry cuts them at the real
+ * intersection, with a soft feather at the edge.  The coarse line-of-sight
+ * culling stays on regardless.  Setups where the depth buffer is unavailable
+ * (some ENB or upscaler stacks) fall back to line-of-sight-only occlusion
+ * automatically, with one log line.
  */
 struct DepthClipSettings
 {
@@ -1156,35 +1552,75 @@ struct DepthClipSettings
 DepthClipSettings& DepthClipConfig();
 
 /**
- * Shared settings mutex.
+ * @brief Shared settings mutex.
  *
- * Readers should hold a shared lock while consuming settings during
- * long operations. Settings::Load() acquires a unique lock.
+ * Every accessor in this namespace returns a reference to a function-local
+ * static.  First-call construction is thread-safe, but the referenced object is
+ * not: a reader must hold a shared lock on this mutex and a writer a unique
+ * lock.  `Load()` rewrites the whole set.  ConsoleCommands.cpp is the only other
+ * writer; it sets `DisplaySettings::EnableDebugOverlay` alone.  The render
+ * thread does not lock per draw; it copies a `RenderSettingsSnapshot` once per
+ * frame when
+ * Generation() changes.
+ *
+ * @return The shared settings mutex.
  */
 [[nodiscard]] std::shared_mutex& Mutex();
 
 /**
- * Settings generation counter.
+ * @brief Settings generation counter.
  *
- * Incremented each time Load() finishes. Consumers can compare against
- * a cached value to avoid re-copying settings when nothing has changed.
+ * Incremented each time `Load()` parses the INI file to the end.  Consumers
+ * compare it against a cached value to avoid re-copying settings that have not
+ * changed.
+ *
+ *
+ * @return The shared generation counter.
+ *
+ * @warning The counter is NOT incremented when
+ * `glyph.ini` is missing: Load()
+ *          applies the defaults, validates them and returns
+ * early. The counter starts at 0 and so do the consumers' cached values, so on a missing-INI start
+ * every generation-gated consumer keeps its default-constructed copy.
  */
 [[nodiscard]] std::atomic<uint32_t>& Generation();
 
 /**
- * Load all settings from glyph.ini.
+ * @brief Load all settings from `Data/SKSE/Plugins/glyph.ini`.
  *
- * Parses the configuration file and populates all settings variables.
- * Called once during plugin initialization and on hot reload.
+ * Called once during plugin initialization and again on every hot reload.  No
+ * INI content can make it throw: a missing file leaves the defaults in place,
+ * and a malformed line or unknown key is counted, logged and skipped.  The one
+ * exception path is a malformed `kSettings` row, which is a programming error;
+ * see the SettingEntry warning in SettingsBinding.hpp.
  *
- * File Location: Data/SKSE/Plugins/glyph.ini
+ * An unparsable numeric value on a `kSettings` scalar key does NOT fall back to
+ * its default.  It becomes 0 and `ClampAndValidate()` then pulls that 0 into the
+ * row's valid range, so a typo in such a key reads as the range floor, not as
+ * the shipped default.  Only a key that is absent keeps its default.  The four
+ * indexed families parse with their own per-field fallbacks and are not covered
+ * by this rule.
  *
- * Missing file or invalid values use defaults. No errors are thrown.
+ * Runs on whichever thread calls it: the SKSE plugin-load thread at startup,
+ * the game thread for a queued hot reload, or the render thread when the SKSE
+ * task interface is null.  Nothing in the parser dereferences a game object, so
+ * all three are safe.
  *
- * @post All extern variables in this namespace are populated with values
- *       from the INI file or their defaults.
- * @post Tiers vector contains all `[TierN]` sections sorted by tier number.
- * @post DisplayFormat contains parsed format segments from the `[Display]` section.
+ * @pre The caller does not already hold a lock on Mutex(); Load() takes it
+ *      uniquely for its whole body.
+ * @post All settings objects reachable through this namespace's accessors are
+ *       populated with values from the INI file or their defaults.
+ * @post Tiers is indexed by tier number: index N holds `TierN`. A gap in the
+ *       numbering is back-filled with a default 'Unknown' tier covering levels
+ *       1-250, which shadows every higher tier, so a gap is warned about. The
+ *       vector is never empty.
+ * @post DisplayFormat and TitleFormat hold the main row and the title line
+ *       parsed from the `Format` key, which is matched in any section; the
+ *       shipped INI puts it at global scope. InfoFormat holds the segments
+ *       parsed from the separate `InfoFormat` key, which defaults to empty
+ *       because the status icon badges supersede the text info row.
+ * @post Generation() has advanced, unless the file was missing, in which case
+ *       it is deliberately left alone.
  *
  * @see Renderer::Draw, TierDefinition, Segment
  */
