@@ -2,6 +2,8 @@
 
 #include "BadgeTextures.hpp"
 
+#include "RasterQuality.hpp"
+
 #include <nanosvg.h>
 #include <nanosvgrast.h>
 #include <wincodec.h>
@@ -22,9 +24,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
-// Rasterization canvas. Power of two so the mip chain halves cleanly.
-constexpr int BADGE_TEX_SIZE = 128;
-
 std::mutex& Mutex()
 {
     static std::mutex m;
@@ -57,18 +56,14 @@ std::atomic<int>& TierImageCountAtomic()
     return n;
 }
 
-// Emblem source PNGs are large (1080^2); this is the square canvas they are
-// resampled into.  Higher than the 128 duotone canvas because the emblems
-// carry fine gold/gem detail.
-constexpr int TIER_IMG_TEX_SIZE = 256;
 // Fraction of the canvas the trimmed emblem fills, so every emblem reads at the
 // same on-screen size regardless of its own transparent margin.
 constexpr float TIER_IMG_FILL = .92f;
 
-// Rasterize <path> into a centered square float-alpha mask of BADGE_TEX_SIZE.
-// The SVG's own layer opacities (duotone secondary .4, primary 1.0) land in
-// the alpha; icons whose strongest layer is translucent are normalized so
-// their peak alpha is 1.0.
+// Rasterize <path> into a centered square float-alpha mask.
+// The SVG's own layer opacities (duotone secondary .4, primary 1.0) land in the
+// alpha; an icon whose strongest layer is translucent is normalized so its peak
+// alpha is 1.0. Returns false when the file does not parse or the mask is empty.
 bool RasterizeIcon(NSVGrasterizer* rast, const std::string& path, std::vector<float>& outAlpha)
 {
     NSVGimage* img = nsvgParseFromFile(path.c_str(), "px", 96.0f);
@@ -83,9 +78,9 @@ bool RasterizeIcon(NSVGrasterizer* rast, const std::string& path, std::vector<fl
     }
 
     // The duotone secondary layer ships at opacity .4, so half of every icon
-    // rasterizes at 40% and reads faint. Lift any translucent shape to a floor
+    // rasterizes at 40% and reads faint. Lift any translucent shape to the floor
     // before rasterizing; the primary layer (1.0) is untouched, and the peak
-    // normalization below still keeps the strongest layer at 1.0.
+    // normalization below keeps the strongest layer at 1.0.
     constexpr float kSecondaryOpacityFloor = .80f;
     for (NSVGshape* shape = img->shapes; shape != nullptr; shape = shape->next)
     {
@@ -95,7 +90,7 @@ bool RasterizeIcon(NSVGrasterizer* rast, const std::string& path, std::vector<fl
         }
     }
 
-    const int size = BADGE_TEX_SIZE;
+    const int size = RasterQuality::STATUS_ICON_TEXTURE_SIZE;
     const float maxDim = (img->width > img->height) ? img->width : img->height;
     const float scale = static_cast<float>(size) / maxDim;
     const float tx = (static_cast<float>(size) - img->width * scale) * .5f;
@@ -133,7 +128,7 @@ bool RasterizeIcon(NSVGrasterizer* rast, const std::string& path, std::vector<fl
 ComPtr<ID3D11ShaderResourceView> CreateBadgeTexture(ID3D11Device* device,
                                                     std::vector<float> levelAlpha)
 {
-    const int size = BADGE_TEX_SIZE;
+    const int size = RasterQuality::STATUS_ICON_TEXTURE_SIZE;
     int mipLevels = 1;
     for (int d = size; d > 1; d >>= 1)
     {
@@ -564,7 +559,7 @@ int InitializeTierImages(ID3D11Device* device, const std::vector<std::string>& p
             CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) ||
         !wic)
     {
-        SKSE::log::warn("BadgeTextures: WIC unavailable -- tier emblem images disabled");
+        SKSE::log::warn("BadgeTextures: WIC unavailable - tier emblem images disabled");
         return 0;
     }
 
@@ -580,9 +575,10 @@ int InitializeTierImages(ID3D11Device* device, const std::vector<std::string>& p
         int sh = 0;
         std::vector<float> base;
         if (!path.empty() && LoadPngRGBA(wic.Get(), path, src, sw, sh) &&
-            BuildTierBase(src, sw, sh, base, TIER_IMG_TEX_SIZE))
+            BuildTierBase(src, sw, sh, base, RasterQuality::RANK_EMBLEM_TEXTURE_SIZE))
         {
-            srv = CreateRGBATexture(device, std::move(base), TIER_IMG_TEX_SIZE);
+            srv =
+                CreateRGBATexture(device, std::move(base), RasterQuality::RANK_EMBLEM_TEXTURE_SIZE);
         }
         if (srv)
         {
@@ -590,7 +586,7 @@ int InitializeTierImages(ID3D11Device* device, const std::vector<std::string>& p
         }
         else
         {
-            SKSE::log::warn("BadgeTextures: tier emblem '{}' failed to load -- rank blank", path);
+            SKSE::log::warn("BadgeTextures: tier emblem '{}' failed to load - rank blank", path);
         }
         TierImages().push_back(std::move(srv));
     }
