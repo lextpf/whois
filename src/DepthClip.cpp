@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -20,17 +21,15 @@ namespace
 // The plate's viewport-space depth comes from the same projection the game
 // rasterized with, so a direct compare against the depth buffer is exact by
 // construction.  Five taps at the feather radius soften the intersection
-// edge so the world appears to pass in front of the type rather than
-// shearing it.  polarity 0 disables the test (neutral params).
+// edge.  polarity 0 disables the test (neutral params).
 constexpr const char* kDepthClipPS = R"(
 cbuffer DepthClipCB : register(b0)
 {
-    float plateDepth;
+    float3 depthPlane;
     float featherPx;
     float polarity;
-    float _pad0;
     float2 invViewport;
-    float2 _pad1;
+    float _pad0;
 };
 Texture2D texture0 : register(t0);
 Texture2D<float> sceneDepth : register(t1);
@@ -43,9 +42,11 @@ struct PS_INPUT
     float2 uv  : TEXCOORD0;
 };
 
-float VisAt(float2 uv)
+float VisAt(float2 uv, uint2 dimensions)
 {
-    float scene = sceneDepth.SampleLevel(sampler0, uv, 0);
+    int2 pixel = clamp(int2(uv * float2(dimensions)), int2(0, 0), int2(dimensions) - 1);
+    float scene = sceneDepth.Load(int3(pixel, 0));
+    float plateDepth = dot(depthPlane, float3(uv, 1.0f));
     return ((scene - plateDepth) * polarity >= 0.0f) ? 1.0f : 0.0f;
 }
 
@@ -54,13 +55,17 @@ float4 main(PS_INPUT input) : SV_Target
     float4 col = input.col * texture0.Sample(sampler0, input.uv);
     if (polarity != 0.0f)
     {
+        uint width;
+        uint height;
+        sceneDepth.GetDimensions(width, height);
+        uint2 dimensions = uint2(width, height);
         float2 uv = input.pos.xy * invViewport;
         float2 o = featherPx * invViewport;
-        float vis = VisAt(uv) * 2.0f
-                  + VisAt(uv + float2( o.x,  o.y))
-                  + VisAt(uv + float2(-o.x,  o.y))
-                  + VisAt(uv + float2( o.x, -o.y))
-                  + VisAt(uv + float2(-o.x, -o.y));
+        float vis = VisAt(uv, dimensions) * 2.0f
+                  + VisAt(uv + float2( o.x,  o.y), dimensions)
+                  + VisAt(uv + float2(-o.x,  o.y), dimensions)
+                  + VisAt(uv + float2( o.x, -o.y), dimensions)
+                  + VisAt(uv + float2(-o.x, -o.y), dimensions);
         col.a *= vis / 6.0f;
     }
     return col;
@@ -69,18 +74,26 @@ float4 main(PS_INPUT input) : SV_Target
 
 struct CBData
 {
-    float plateDepth = 1.0f;
+    float depthPlane[3] = {.0f, .0f, 1.0f};
     float featherPx = 2.5f;
     float polarity = .0f;
-    float pad0 = .0f;
     float invViewport[2] = {};
-    float pad1[2] = {};
+    float pad0 = .0f;
 };
+static_assert(sizeof(CBData) == 32);
 
 struct PlateParams
 {
-    float depth = 1.0f;
+    float depthPlane[3] = {.0f, .0f, 1.0f};
     bool neutral = false;
+};
+
+struct SavedPixelState
+{
+    ComPtr<ID3D11PixelShader> shader;
+    ComPtr<ID3D11Buffer> constantBuffer;
+    ComPtr<ID3D11ShaderResourceView> depthResource;
+    bool active = false;
 };
 
 ComPtr<ID3D11Device> s_Device;
@@ -93,6 +106,7 @@ ID3D11ShaderResourceView* s_DepthSRV = nullptr;  // borrowed from the game
 float s_FeatherPx = 2.5f;
 float s_Polarity = .0f;
 std::deque<PlateParams> s_ParamArena;  // deque: stable addresses across push_back
+std::vector<SavedPixelState> s_StateStack;
 
 bool s_Initialized = false;
 bool s_SrvWarned = false;
@@ -168,6 +182,7 @@ void Shutdown()
     s_Device.Reset();
     s_DepthSRV = nullptr;
     s_ParamArena.clear();
+    s_StateStack.clear();
     s_Initialized = false;
     s_SrvWarned = false;
 }
@@ -176,6 +191,7 @@ bool BeginFrame(float featherPx, float polarity)
 {
     s_DepthSRV = nullptr;
     s_ParamArena.clear();
+    s_StateStack.clear();
     if (!s_Initialized || polarity == .0f)
     {
         return false;
@@ -189,10 +205,10 @@ bool BeginFrame(float featherPx, float polarity)
 
     // Only the post-Z-prepass COPY is safe to sample: the live kMAIN depth
     // may still be bound as a DSV during UI rendering, and D3D silently
-    // nulls a conflicting SRV binding -- which would read as depth 0 and
+    // nulls a conflicting SRV binding - which would read as depth 0 and
     // make every plate invisible.  If the copy is absent (some ENB or
-    // upscaler stacks), the frame simply goes unclipped and the existing
-    // LOS culling remains the only occlusion.
+    // upscaler stacks), the frame goes unclipped and line-of-sight culling
+    // remains the only occlusion.
     auto& data = renderer->data;
     s_DepthSRV = data.depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV;
     if (!s_DepthSRV)
@@ -201,7 +217,7 @@ bool BeginFrame(float featherPx, float polarity)
         {
             s_SrvWarned = true;
             logger::warn(
-                "DepthClip: no scene depth SRV available -- falling back to LOS-only occlusion");
+                "DepthClip: no scene depth SRV available - falling back to LOS-only occlusion");
         }
         return false;
     }
@@ -213,55 +229,106 @@ bool BeginFrame(float featherPx, float polarity)
 
 void* MakePlateParams(float plateDepthNDC)
 {
-    s_ParamArena.push_back({plateDepthNDC, false});
+    PlateParams params;
+    params.depthPlane[2] = plateDepthNDC;
+    s_ParamArena.push_back(params);
+    return &s_ParamArena.back();
+}
+
+void* MakePlaneParams(float depthX, float depthY, float depthConstant)
+{
+    PlateParams params;
+    params.depthPlane[0] = depthX;
+    params.depthPlane[1] = depthY;
+    params.depthPlane[2] = depthConstant;
+    s_ParamArena.push_back(params);
     return &s_ParamArena.back();
 }
 
 void* MakeNeutralParams()
 {
-    s_ParamArena.push_back({1.0f, true});
+    PlateParams params;
+    params.neutral = true;
+    s_ParamArena.push_back(params);
     return &s_ParamArena.back();
 }
 
 void ApplyCallback(const ImDrawList* /*dl*/, const ImDrawCmd* cmd)
 {
-    if (!s_Context || !s_PS || !s_CB || !s_DepthSRV || !cmd || !cmd->UserCallbackData)
+    if (!s_Context)
     {
+        return;
+    }
+
+    // Keep Apply/Restore balanced even if a recoverable setup step fails.
+    SavedPixelState saved{};
+    if (!s_PS || !s_CB || !s_DepthSRV || !cmd || !cmd->UserCallbackData)
+    {
+        s_StateStack.push_back(std::move(saved));
         return;
     }
     const auto* params = static_cast<const PlateParams*>(cmd->UserCallbackData);
 
     // The active viewport tells us the pixel->uv mapping for whichever
     // channel is executing (full-res backbuffer, full-res divide RT, or the
-    // half-res glow capture) -- SV_Position is always in that space.
+    // half-res glow capture) - SV_Position is always in that space.
     D3D11_VIEWPORT vp{};
     UINT vpCount = 1;
     s_Context->RSGetViewports(&vpCount, &vp);
     if (vpCount == 0 || vp.Width <= .0f || vp.Height <= .0f)
     {
+        s_StateStack.push_back(std::move(saved));
         return;
     }
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(s_Context->Map(s_CB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
+        s_StateStack.push_back(std::move(saved));
         return;
     }
     auto* cb = static_cast<CBData*>(mapped.pData);
-    cb->plateDepth = params->depth;
+    cb->depthPlane[0] = params->depthPlane[0];
+    cb->depthPlane[1] = params->depthPlane[1];
+    cb->depthPlane[2] = params->depthPlane[2];
     cb->featherPx = s_FeatherPx;
     cb->polarity = params->neutral ? .0f : s_Polarity;
-    cb->pad0 = .0f;
     cb->invViewport[0] = 1.0f / vp.Width;
     cb->invViewport[1] = 1.0f / vp.Height;
-    cb->pad1[0] = .0f;
-    cb->pad1[1] = .0f;
+    cb->pad0 = .0f;
     s_Context->Unmap(s_CB.Get(), 0);
+
+    s_Context->PSGetShader(saved.shader.GetAddressOf(), nullptr, nullptr);
+    s_Context->PSGetConstantBuffers(0, 1, saved.constantBuffer.GetAddressOf());
+    s_Context->PSGetShaderResources(1, 1, saved.depthResource.GetAddressOf());
+    saved.active = true;
+    s_StateStack.push_back(std::move(saved));
 
     s_Context->PSSetShader(s_PS.Get(), nullptr, 0);
     ID3D11Buffer* cbs[1] = {s_CB.Get()};
     s_Context->PSSetConstantBuffers(0, 1, cbs);
     ID3D11ShaderResourceView* srvs[1] = {s_DepthSRV};
     s_Context->PSSetShaderResources(1, 1, srvs);
+}
+
+void RestoreCallback(const ImDrawList* /*dl*/, const ImDrawCmd* /*cmd*/)
+{
+    if (!s_Context || s_StateStack.empty())
+    {
+        return;
+    }
+
+    SavedPixelState saved = std::move(s_StateStack.back());
+    s_StateStack.pop_back();
+    if (!saved.active)
+    {
+        return;
+    }
+
+    s_Context->PSSetShader(saved.shader.Get(), nullptr, 0);
+    ID3D11Buffer* constantBuffer = saved.constantBuffer.Get();
+    s_Context->PSSetConstantBuffers(0, 1, &constantBuffer);
+    ID3D11ShaderResourceView* depthResource = saved.depthResource.Get();
+    s_Context->PSSetShaderResources(1, 1, &depthResource);
 }
 }  // namespace DepthClip
