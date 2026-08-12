@@ -23,21 +23,23 @@
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
 
-// Lifecycle: Initialize() loads textures once after D3D11 device creation.
-// Shutdown() releases resources and allows safe re-initialization.
+// Lifecycle: Initialize() loads textures once after D3D11 device creation and
+// is a no-op once it has succeeded, so it never notices a new device; a device
+// change must run Shutdown() first (Hooks::HandleDeviceChange does). Shutdown()
+// releases every resource and allows a later re-initialization. Every function
+// here is render-thread only.
 namespace ParticleTextures
 {
-// Number of particle texture types -- one slot per Settings::ParticleStyle.
+// Number of particle texture types - one slot per Settings::ParticleStyle.
 // The canonical style/token order lives in Settings::kParticleStyleTokens.
 static constexpr int NUM_TYPES = Settings::kParticleStyleCount;
 
-// Explicit art compensation in ParticleStyle enum order. A full coin/heart
-// already fills much of its frame; dust, pixiedust, etc. paint only a
-// handful of pixels and therefore need a much larger crisp quad. The halo
-// scale is independent so increasing a sparse core never increases its
-// background bloom. Values were derived from every active strip frame's
-// alpha-weighted area, then art-directed by silhouette (mist stays mist,
-// sparks stay pinpoints, solid icons stay compact).
+// Art compensation in ParticleStyle enum order. A full coin/heart already fills
+// much of its frame; dust, pixiedust and similar paint only a handful of pixels
+// and therefore need a much larger crisp quad. The halo scale is independent, so
+// enlarging a sparse core does not enlarge its background bloom. Values come from
+// the alpha-weighted painted area of every active strip frame, adjusted per
+// silhouette (mist stays mist, sparks stay pinpoints, solid icons stay compact).
 static constexpr std::array<StyleVisibilityTuning, NUM_TYPES> kStyleVisibilityTuning = {{
     {1.90f, .35f, .70f},  // firefly
     {1.45f, .70f, .55f},  // snow
@@ -93,25 +95,27 @@ const StyleVisibilityTuning& GetStyleVisibilityTuning(int style)
     return kStyleVisibilityTuning[style];
 }
 
-// Texture info struct
 struct TextureInfo
 {
     ComPtr<ID3D11ShaderResourceView> srv;
     int width = 0;
     int height = 0;
-    int frames = 1;  ///< Horizontal flipbook frames (strips: width / height)
+    // Horizontal flipbook frames: width / height when the width is an exact
+    // multiple of the height and the quotient is above 1; otherwise 1.
+    int frames = 1;
 };
 
-// Multiple textures per particle type
+// Loaded variants per particle style; a style may hold several.
 static std::array<std::vector<TextureInfo>, NUM_TYPES>& Textures()
 {
     static std::array<std::vector<TextureInfo>, NUM_TYPES> instance;
     return instance;
 }
 
-// One optional end-of-life "pop" sprite per style, outside the hash rotation
-// (a pop frame inside Textures() would render a fraction of the particles as
-// permanently mid-pop). Today only Bubble ships one (bubblepop.png).
+// One optional end-of-life "pop" sprite per style, kept outside the variant
+// rotation: a pop frame inside Textures() would render a fraction of the
+// particles as permanently mid-pop. Initialize fills the Bubble slot only, from
+// the manifest's "bubblePop" entry; every other slot stays empty.
 static std::array<TextureInfo, NUM_TYPES>& PopTextures()
 {
     static std::array<TextureInfo, NUM_TYPES> instance;
@@ -141,6 +145,27 @@ static ComPtr<ID3D11BlendState> s_ScreenBlend;
 static ComPtr<ID3D11Device> s_Device;
 static ComPtr<ID3D11DeviceContext> s_Context;
 
+struct SavedSamplerState
+{
+    ComPtr<ID3D11SamplerState> sampler;
+    bool active = false;
+};
+
+struct SavedBlendState
+{
+    ComPtr<ID3D11BlendState> blend;
+    float factor[4] = {};
+    UINT sampleMask = 0xFFFFFFFF;
+    bool active = false;
+};
+
+// Sprite callbacks execute later, while ImDrawData is rendered. These stacks
+// let a sprite change only sampler/blend state and restore exactly that, instead
+// of invoking ImGui's full render-state reset, which would also discard an
+// enclosing Graffito vertex shader or DepthClip pixel shader.
+static std::vector<SavedSamplerState> s_SamplerStateStack;
+static std::vector<SavedBlendState> s_BlendStateStack;
+
 static void ReleaseResources_NoLock()
 {
     for (auto& typeTextures : Textures())
@@ -163,14 +188,17 @@ static void ReleaseResources_NoLock()
     s_LinearSampler.Reset();
     s_AdditiveBlend.Reset();
     s_ScreenBlend.Reset();
+    s_SamplerStateStack.clear();
+    s_BlendStateStack.clear();
     s_Context.Reset();
     s_Device.Reset();
     s_Initialized = false;
 }
 
-// Load a PNG file using WIC and create a D3D11 texture.
-// Returns TextureInfo with dimensions. `alphaGamma` below 1 lifts partially
-// transparent painted pixels while preserving fully transparent texels.
+// Load a PNG file using WIC and create a D3D11 texture. Returns a TextureInfo
+// with dimensions, or a default-constructed one (null srv) on any failure.
+// alphaGamma below 1 lifts partially transparent painted pixels while leaving
+// fully transparent texels transparent.
 static TextureInfo LoadTextureFromFile(ID3D11Device* device,
                                        ID3D11DeviceContext* context,
                                        const std::string& path,
@@ -183,7 +211,6 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         return info;
     }
 
-    // Convert path to wide string
     int wideLen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
     if (wideLen <= 0)
     {
@@ -193,7 +220,6 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
     std::wstring widePath(wideLen, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &widePath[0], wideLen);
 
-    // Load the image
     ComPtr<IWICBitmapDecoder> decoder;
     HRESULT hr = wicFactory->CreateDecoderFromFilename(
         widePath.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder);
@@ -203,7 +229,6 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         return info;
     }
 
-    // Get first frame
     ComPtr<IWICBitmapFrameDecode> frame;
     hr = decoder->GetFrame(0, &frame);
     if (FAILED(hr))
@@ -211,7 +236,7 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         return info;
     }
 
-    // Convert to RGBA
+    // Decode to 32bpp RGBA.
     ComPtr<IWICFormatConverter> converter;
     hr = wicFactory->CreateFormatConverter(&converter);
     if (FAILED(hr))
@@ -230,7 +255,6 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         return info;
     }
 
-    // Get dimensions
     UINT width, height;
     hr = converter->GetSize(&width, &height);
     if (FAILED(hr))
@@ -238,7 +262,7 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         return info;
     }
 
-    // Read pixels
+    // Reject sizes whose RGBA buffer would overflow a UINT byte count.
     if (width == 0 || height == 0 || width > ((std::numeric_limits<UINT>::max)() / 4))
     {
         SKSE::log::warn(
@@ -261,8 +285,8 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         return info;
     }
 
-    // Sanitize transparent pixels so blend modes (especially screen-like) don't pick up
-    // hidden RGB from fully transparent texels and produce box artifacts.
+    // Zero the RGB of fully transparent texels so blend modes (screen-like above
+    // all) cannot lift hidden color into the framebuffer as box artifacts.
     {
         const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
         for (size_t i = 0; i < pixelCount; ++i)
@@ -289,11 +313,12 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         }
     }
 
-    // High-resolution sources get a full GPU-generated mip chain so minified
-    // sprites stay stable in motion (no shimmer) -- same pattern as the
-    // mipmapped font atlas in Hooks.cpp. Small pixel-art sprites (<= 64px)
-    // keep a single level; they are only ever magnified and use point
-    // sampling anyway.
+    // A source above 64 px gets a full GPU-generated mip chain so minified
+    // sprites stay stable in motion (no shimmer) - same pattern as the mipmapped
+    // font atlas in Hooks.cpp. Smaller pixel-art sprites keep a single level; they
+    // are only ever magnified and use point sampling anyway. This threshold reads
+    // the whole image, while DrawSpriteQuad's point/linear switch reads one strip
+    // frame, so a wide strip of small frames can be mipped and still point-sampled.
     const UINT maxDim = (width > height) ? width : height;
     if (context && maxDim > 64)
     {
@@ -342,7 +367,6 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         // Mipped path failed; fall through to the single-level texture below.
     }
 
-    // Create D3D11 texture
     D3D11_TEXTURE2D_DESC texDesc = {};
     texDesc.Width = width;
     texDesc.Height = height;
@@ -365,7 +389,6 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
         return info;
     }
 
-    // Create SRV
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -386,9 +409,10 @@ static TextureInfo LoadTextureFromFile(ID3D11Device* device,
     return info;
 }
 
-// RAII wrapper for COM initialization.
-// Only calls CoUninitialize if this scope actually initialized COM
-// (avoids unbalancing the ref count when a third-party hook already initialized it).
+// RAII wrapper for COM initialization. Calls CoUninitialize only if this scope
+// initialized COM, so the ref count stays balanced when another mod or hook
+// already initialized it. `usable` is also true for RPC_E_CHANGED_MODE, where
+// COM is up under a different apartment model.
 struct ComScope
 {
     bool ownsInit = false;
@@ -425,11 +449,11 @@ struct ComScope
 // color multiplication.
 //
 // Quality pipeline applied to every generator:
-//   1. 4x rotated-grid supersampling -- anti-aliases thin line work and
+//   1. 4x rotated-grid supersampling - anti-aliases thin line work and
 //      star spikes that a single center sample would shimmer on.
 //   2. Interleaved-gradient-noise dithering at 8-bit quantization --
 //      removes banding rings in the smooth Gaussian glow falloffs.
-//   3. Full mip chain (2x2 box reduction in float) -- stable minification
+//   3. Full mip chain (2x2 box reduction in float) - stable minification
 //      when particles render small or rotate on screen.
 
 static constexpr int PROC_SIZE = 256;
@@ -1065,10 +1089,9 @@ static float RuneEye(float nx, float ny)
 // ---- Orbs ----
 
 // Soft featureless light disc for the particle glow halo: a pure Gaussian
-// falloff with no core, spikes, or art. Drawn additively behind the crisp
-// sprite it reads as emitted light -- reusing the sprite art itself for the
-// halo (the old approach) read as a transparent scaled-up duplicate of the
-// particle instead of a glow.
+// falloff with no core, spikes, or art. Drawn additively behind the crisp sprite
+// it reads as emitted light. The halo must not reuse the sprite art, which reads
+// as a transparent scaled-up duplicate of the particle instead of a glow.
 static float HaloSoftDisc(float nx, float ny)
 {
     float r = std::sqrt(nx * nx + ny * ny);
@@ -1264,9 +1287,9 @@ struct GenArray
     int count;
 };
 
-// Procedural sets are a safety fallback only -- they render solely for a
-// weather type whose PNG is missing. Each type reuses the closest-looking
-// legacy generator set rather than shipping bespoke generators.
+// Procedural sets are a fallback only: they render solely for a style that
+// loaded no sprite from the manifest. Each style reuses the closest-looking
+// generator set rather than shipping bespoke generators.
 static const GenArray kAllGens[NUM_TYPES] = {
     {kOrbGens, 5},      // Firefly  -> soft glowing orbs
     {kStarGens, 7},     // Snow     -> star/flake points
@@ -1326,10 +1349,10 @@ static TextureInfo CreateProceduralTexture(ID3D11Device* device, PPixelFn genera
     const int size = PROC_SIZE;
 
     // Level 0 in float: 4x rotated-grid supersampling per pixel. The circular
-    // guard mask is applied per sample so its edge is anti-aliased together
-    // with the design. Starting the mask at .88 still forces alpha to zero at
-    // the quad boundary (no square clipping under additive blending) without
-    // eating into designs that reach r ~ .7.
+    // guard mask is applied per sample, so its edge is anti-aliased together with
+    // the design. Starting the mask at .88 forces alpha to zero at the quad
+    // boundary (no square clipping under additive blending) without eating into
+    // designs that reach r ~ .7.
     std::vector<float> levelAlpha(static_cast<size_t>(size) * size);
     static constexpr float SAMPLE_OFFSETS[4][2] = {
         {-.375f, .125f}, {.125f, .375f}, {.375f, -.125f}, {-.125f, -.375f}};
@@ -1395,7 +1418,7 @@ static TextureInfo CreateProceduralTexture(ID3D11Device* device, PPixelFn genera
         }
 
         // Quantize with interleaved gradient noise as unbiased stochastic
-        // rounding -- removes banding rings in smooth glow falloffs.
+        // rounding - removes banding rings in smooth glow falloffs.
         auto& pixels = mipPixels[level];
         pixels.resize(static_cast<size_t>(dim) * dim * 4);
         for (int y = 0; y < dim; ++y)
@@ -1545,7 +1568,7 @@ bool Initialize(ID3D11Device* device)
         SKSE::log::info("ParticleTextures: Created linear sampler for HD particles");
     }
 
-    // Create additive blend state for bright magical particles
+    // Additive blend state for bright particles.
     D3D11_BLEND_DESC addDesc = {};
     addDesc.AlphaToCoverageEnable = FALSE;
     addDesc.IndependentBlendEnable = FALSE;
@@ -1567,8 +1590,8 @@ bool Initialize(ID3D11Device* device)
         SKSE::log::info("ParticleTextures: Created additive blend state");
     }
 
-    // Create a screen-like blend state for softer luminous sprites.
-    // Gate source contribution by source alpha to avoid rectangle artifacts.
+    // Screen-like blend state for softer luminous sprites. The source
+    // contribution is gated by source alpha to avoid rectangle artifacts.
     D3D11_BLEND_DESC screenDesc = addDesc;
     screenDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
     screenDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_COLOR;
@@ -1582,7 +1605,8 @@ bool Initialize(ID3D11Device* device)
         SKSE::log::info("ParticleTextures: Created screen blend state");
     }
 
-    // Try to load user-provided textures from folders (overrides procedural)
+    // Manifest-mapped sprites take priority; procedural generation below only
+    // covers the styles that end up with none.
     int totalLoaded = 0;
     {
         ComScope com;
@@ -1594,14 +1618,13 @@ bool Initialize(ID3D11Device* device)
             if (SUCCEEDED(wicHr))
             {
                 // Sprite sources come from the obfuscated asset manifest: each
-                // style token maps to a list of GUID-named variant files (the
-                // curated static-or-strip set the old on-disk scan resolved).
-                // A file that is a horizontal flipbook (width a multiple of
-                // height) auto-detects its frame count from its dimensions --
-                // the "_strip" naming is no longer needed. Every loaded variant
-                // enters the per-particle hash rotation (GetTextureInfoForIndex),
-                // so a style with N variants spawns each on ~1/N of its
-                // particles, stably (no flicker across frames).
+                // style token maps to a list of GUID-named variant files, static
+                // or strip. A horizontal flipbook (width an exact multiple of
+                // height, quotient > 1) gets its frame count from its dimensions;
+                // filenames carry no information. Every loaded variant enters the
+                // per-particle variant rotation (GetTextureInfoForIndex), so a
+                // style with N variants spawns each on ~1/N of its particles,
+                // stably (no flicker across frames).
                 const auto detectFrames = [](TextureInfo& info)
                 {
                     if (info.height > 0 && info.width % info.height == 0 &&
@@ -1635,7 +1658,7 @@ bool Initialize(ID3D11Device* device)
                 }
 
                 // End-of-life pop sprite for Bubble, outside the hash rotation
-                // (see PopTextures); frame count auto-detected as above.
+                // (see PopTextures); frame count detected as above.
                 if (const std::string& popPath = ProjectManifest::BubblePop(); !popPath.empty())
                 {
                     const int bubbleStyle = static_cast<int>(Settings::ParticleStyle::Bubble);
@@ -1662,7 +1685,7 @@ bool Initialize(ID3D11Device* device)
         }
     }
 
-    // Generate procedural textures for any style that has no user-provided textures
+    // Procedural fallback for any style the manifest gave no usable file.
     for (int i = 0; i < NUM_TYPES; ++i)
     {
         if (Textures()[i].empty())
@@ -1689,12 +1712,32 @@ bool Initialize(ID3D11Device* device)
     return s_Initialized.load(std::memory_order_acquire);
 }
 
-// Callback to set a specific sampler before drawing a sprite.
+// Bind the sampler passed as UserCallbackData and push the previous one, for
+// RestoreSamplerCallback to pop. Runs on the render thread during ImGui render.
 static void SetSamplerCallback(const ImDrawList*, const ImDrawCmd* cmd)
 {
     auto* sampler = reinterpret_cast<ID3D11SamplerState*>(cmd ? cmd->UserCallbackData : nullptr);
+    SavedSamplerState saved{};
     if (s_Context && sampler)
     {
+        s_Context->PSGetSamplers(0, 1, saved.sampler.GetAddressOf());
+        saved.active = true;
+        s_Context->PSSetSamplers(0, 1, &sampler);
+    }
+    s_SamplerStateStack.push_back(std::move(saved));
+}
+
+static void RestoreSamplerCallback(const ImDrawList*, const ImDrawCmd*)
+{
+    if (s_SamplerStateStack.empty())
+    {
+        return;
+    }
+    SavedSamplerState saved = std::move(s_SamplerStateStack.back());
+    s_SamplerStateStack.pop_back();
+    if (s_Context && saved.active)
+    {
+        ID3D11SamplerState* sampler = saved.sampler.Get();
         s_Context->PSSetSamplers(0, 1, &sampler);
     }
 }
@@ -1702,10 +1745,29 @@ static void SetSamplerCallback(const ImDrawList*, const ImDrawCmd* cmd)
 static void SetBlendCallback(const ImDrawList*, const ImDrawCmd* cmd)
 {
     auto* blend = reinterpret_cast<ID3D11BlendState*>(cmd ? cmd->UserCallbackData : nullptr);
+    SavedBlendState saved{};
     if (s_Context && blend)
     {
-        constexpr float blendFactor[4] = {0, 0, 0, 0};
-        s_Context->OMSetBlendState(blend, blendFactor, 0xFFFFFFFF);
+        s_Context->OMGetBlendState(saved.blend.GetAddressOf(), saved.factor, &saved.sampleMask);
+        saved.active = true;
+        constexpr float factor[4] = {0, 0, 0, 0};
+        s_Context->OMSetBlendState(blend, factor, 0xFFFFFFFF);
+    }
+    s_BlendStateStack.push_back(std::move(saved));
+}
+
+static void RestoreBlendCallback(const ImDrawList*, const ImDrawCmd*)
+{
+    if (s_BlendStateStack.empty())
+    {
+        return;
+    }
+    SavedBlendState saved = std::move(s_BlendStateStack.back());
+    s_BlendStateStack.pop_back();
+    if (s_Context && saved.active)
+    {
+        ID3D11BlendState* blend = saved.blend.Get();
+        s_Context->OMSetBlendState(blend, saved.factor, saved.sampleMask);
     }
 }
 
@@ -1729,11 +1791,11 @@ int GetTextureCount(int style)
     return static_cast<int>(Textures()[style].size());
 }
 
-// Simple hash for better texture distribution while remaining stable
+// Stable mix of style and particle index. The one call site passes particle
+// index 0, which collapses the avalanche steps and leaves a per-style constant
+// offset; the particle index enters the choice through the round-robin below.
 static size_t HashIndex(int style, int particleIndex)
 {
-    // Mix style and index for varied distribution
-    // Using prime multipliers for better spread
     size_t hash = static_cast<size_t>(particleIndex);
     hash ^= hash >> 16;
     hash *= 0x85ebca6b;
@@ -1755,12 +1817,12 @@ static const TextureInfo* GetTextureInfoForIndex(int style, int particleIndex)
         return nullptr;
     }
 
-    // Stratified round-robin with a per-style hash offset: consecutive
-    // particles cycle through the variants, so a style with N variants puts
-    // each on an equal share of its particles (within +/-1) even at small
-    // counts -- a raw hash can starve a variant entirely at count ~8. Still
-    // deterministic per particle across frames (no flicker), and the style
-    // offset keeps different styles from starting on the same variant.
+    // Stratified round-robin with a per-style hash offset: consecutive particles
+    // cycle through the variants, so a style with N variants puts each on an equal
+    // share of its particles (within +/-1) even at small counts - a raw hash can
+    // starve a variant entirely at count ~8. The result stays deterministic per
+    // particle across frames (no flicker), and the style offset keeps different
+    // styles from starting on the same variant.
     const size_t texCount = Textures()[style].size();
     const size_t texIndex = (static_cast<size_t>(particleIndex) + HashIndex(style, 0)) % texCount;
     return &Textures()[style][texIndex];
@@ -1773,7 +1835,7 @@ ImTextureID GetRandomTexture(int style, int particleIndex)
 }
 
 // Shared quad emitter for sprite draws: frame-UV selection, resolution
-// normalization, sampler + blend callbacks. `frame` indexes into a horizontal
+// normalization, sampler + blend callbacks. frame indexes into a horizontal
 // flipbook strip and is wrapped into [0, frames).
 static void DrawSpriteQuad(ImDrawList* list,
                            const ImVec2& center,
@@ -1794,9 +1856,11 @@ static void DrawSpriteQuad(ImDrawList* list,
     frame = ((frame % frames) + frames) % frames;
     const float frameWidth = static_cast<float>(texInfo.width) / static_cast<float>(frames);
 
-    // Normalize display size for high-resolution textures.
-    // 2K (2048px) sources should display at a visible size, not shrink to dots.
-    // Strips measure by the single frame, not the whole sheet.
+    // Cap the on-screen size of high-resolution sources. The caller passes the
+    // same requested edge whatever the art resolution, so a frame above 1200 px
+    // is scaled by 1200 / maxFrameDim; the .45 floor stops a very large source
+    // (4K and up) from shrinking to a dot. A frame at or below 1200 px keeps the
+    // requested edge. Strips measure by the single frame, not by the whole sheet.
     const float texMaxDim = (std::max)(frameWidth, static_cast<float>(texInfo.height));
     const float resolutionScale =
         (texMaxDim > .0f) ? std::clamp(1200.0f / texMaxDim, .45f, 1.0f) : 1.0f;
@@ -1807,11 +1871,10 @@ static void DrawSpriteQuad(ImDrawList* list,
         return;
     }
 
-    // Point-sample by default so the low-res pixel-art sprites stay razor-crisp
-    // at any magnification -- the premium look layers soft glow AROUND the hard
-    // pixel edge, it never blurs it.  Linear filtering only for genuinely HD
-    // source textures (>64px per frame), where nearest-neighbor would alias on
-    // minify.
+    // Point-sample by default so low-resolution pixel-art sprites keep hard edges
+    // at any magnification; the glow is layered around that edge, never blurred
+    // into it. Linear filtering only above 64 px per frame, where nearest-neighbor
+    // would alias on minification.
     ID3D11SamplerState* samplerToUse =
         (texMaxDim > 64.0f && s_LinearSampler) ? s_LinearSampler.Get() : s_PointSampler.Get();
 
@@ -1845,18 +1908,15 @@ static void DrawSpriteQuad(ImDrawList* list,
 
     if (rotation == .0f)
     {
-        // Simple axis-aligned quad
         ImVec2 pMin(center.x - halfSize, center.y - halfSize);
         ImVec2 pMax(center.x + halfSize, center.y + halfSize);
         list->AddImage(tex, pMin, pMax, ImVec2(u0, 0), ImVec2(u1, 1), color);
     }
     else
     {
-        // Rotated quad using AddImageQuad
         float cosR = std::cos(rotation);
         float sinR = std::sin(rotation);
 
-        // Calculate rotated corners
         ImVec2 corners[4];
         float offsets[4][2] = {
             {-halfSize, -halfSize},  // Top-left
@@ -1872,7 +1932,6 @@ static void DrawSpriteQuad(ImDrawList* list,
             corners[i] = ImVec2(center.x + rx, center.y + ry);
         }
 
-        // UV coordinates for the corners
         ImVec2 uvs[4] = {
             ImVec2(u0, 0),  // Top-left
             ImVec2(u1, 0),  // Top-right
@@ -1892,10 +1951,15 @@ static void DrawSpriteQuad(ImDrawList* list,
                            color);
     }
 
-    // Reset to let ImGui restore its default sampler
-    if (samplerToUse || blendToUse)
+    // Restore only the states set above. A full ImGui reset would also erase the
+    // enclosing world-projection and depth shaders between particle sprites.
+    if (blendToUse)
     {
-        list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        list->AddCallback(RestoreBlendCallback, nullptr);
+    }
+    if (samplerToUse)
+    {
+        list->AddCallback(RestoreSamplerCallback, nullptr);
     }
 }
 
@@ -1974,7 +2038,7 @@ bool HasSoftGlow()
 
 void PushAdditiveBlend(ImDrawList* dl)
 {
-    if (dl && s_AdditiveBlend)
+    if (dl)
     {
         dl->AddCallback(SetBlendCallback, s_AdditiveBlend.Get());
     }
@@ -1982,7 +2046,7 @@ void PushAdditiveBlend(ImDrawList* dl)
 
 void PushScreenBlend(ImDrawList* dl)
 {
-    if (dl && s_ScreenBlend)
+    if (dl)
     {
         dl->AddCallback(SetBlendCallback, s_ScreenBlend.Get());
     }
@@ -1992,7 +2056,7 @@ void PopBlendState(ImDrawList* dl)
 {
     if (dl)
     {
-        dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        dl->AddCallback(RestoreBlendCallback, nullptr);
     }
 }
 }  // namespace ParticleTextures
