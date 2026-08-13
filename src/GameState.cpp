@@ -4,7 +4,9 @@
 
 namespace GameState
 {
-bool CanDrawOverlay()
+namespace
+{
+bool IsWorldReady()
 {
     auto* main = RE::Main::GetSingleton();
     if (!main)
@@ -56,13 +58,25 @@ bool CanDrawOverlay()
         return false;
     }
 
-    // Unconditionally hide during combat - floating names above enemies would
-    // reveal hidden NPCs and clutter the screen during action sequences.
-    if (player->IsInCombat())
+    return true;
+}
+}  // namespace
+
+bool CanCaptureDeck()
+{
+    return IsWorldReady();
+}
+
+bool CanDrawOverlay()
+{
+    if (!IsWorldReady())
     {
         return false;
     }
 
-    return true;
+    // Labels hide during combat so they cannot reveal enemy positions. Deck is a
+    // key-triggered capture, so it stops at the lighter IsWorldReady gate.
+    const auto* player = RE::PlayerCharacter::GetSingleton();
+    return player && !player->IsInCombat();
 }
 }  // namespace GameState
