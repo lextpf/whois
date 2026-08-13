@@ -48,8 +48,8 @@ bool TrueHUDShowsBarFor(RE::Actor* actor)
     {
         return false;
     }
-    // Floating-only: bars anchored over the actor's head are the ones a
-    // nameplate would stack against; the docked boss bar lives elsewhere.
+    // Floating bars only: those sit over the actor's head, where a nameplate
+    // would stack against them. The docked boss bar does not count.
     return g_trueHUD->HasInfoBar(actor->GetHandle(), true);
 }
 
@@ -59,6 +59,12 @@ std::uint32_t CrosshairTargetFormID()
     if (!pick)
     {
         return 0;
+    }
+    // Prefer the engine's actor-specific pick. The generic target can be a
+    // weapon, activator, or collision proxy sitting in front of the actor.
+    if (const auto actorRef = pick->targetActor.get())
+    {
+        return actorRef->GetFormID();
     }
     const auto refr = pick->target.get();
     return refr ? refr->GetFormID() : 0;
