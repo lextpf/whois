@@ -1,6 +1,36 @@
+// RendererEffects - the draw passes for one nameplate: text-effect dispatch, the
+// background glow, the particle aura, the ornaments, the text rows, the badge
+// strip and the tier emblem.
+//
+// Render thread only. Nothing here reads game state: every input is either the
+// per-frame RenderSettingsSnapshot or the plain-data ActorDrawData the game thread
+// published, so no RE:: object is dereferenced in this file.
+//
+// Every pass writes through the ImDrawListSplitter that Draw() opened, and the
+// channel index depends on whether the GPU glow pass is live. gpuGlow is
+// snap.enableGlow && TextPostProcess::IsInitialized(); Renderer.cpp splits into 3
+// channels when it holds and 2 when it does not:
+//
+//   gpuGlow                                 no gpuGlow
+//     0  glow capture: the mist veil,         0  back: the mist veil, the particle
+//        plus one flat AddText copy of           aura, and the multi-copy CPU glow
+//        every glowing string                 1  front: shadow, text, badges, emblem
+//     1  back: the particle aura
+//     2  front: shadow, text, badges, emblem
+//
+// Channels merge in index order, so a lower channel draws behind a higher one.
+// Every function that draws sets its own channel; none of them restores the
+// previous one, so a caller must not assume a channel survives a call.
+//
+// Draw order for one live plate (Renderer.cpp, DrawLabel):
+//
+//   DrawBackgroundGlow -> DrawParticlesAndOrnaments -> DrawTitleText ->
+//   DrawMainLineSegments -> DrawInfoLineSegments -> DrawBadges -> DrawTierEmblem
+
 #include "RendererInternal.hpp"
 
 #include "ParticleTextures.hpp"
+#include "RenderSampling.hpp"
 #include "TextPostProcess.hpp"
 
 #include <cctype>
@@ -21,6 +51,10 @@ struct EffectArgs
 
 namespace
 {
+// Reshape the vertices this ApplyTextEffect call already emitted, from vtxStart to
+// the end of the buffer: make the text body translucent (innerTextAlpha below 1)
+// and lift its brightness (textGlowAlpha above 0). Both are no-ops when neither
+// knob is engaged, so a plate never pays the scan for a feature that is off.
 static void ApplyTextTransparency(ImDrawList* drawList,
                                   int vtxStart,
                                   float innerTextAlpha,
@@ -55,15 +89,17 @@ static void ApplyTextTransparency(ImDrawList* drawList,
         return;
     }
 
-    // Main text fill is the brightest pass that also carries the highest alpha in
-    // the batch. Lower-alpha support layers such as inner outlines, glows, and
-    // shimmer accents should not be made more transparent a second time.
+    // The main text fill is the brightest pass and carries the highest alpha in
+    // the batch. Lower-alpha support layers - inner outlines, glows, shimmer
+    // accents - must not be made transparent a second time. The threshold is
+    // about 83% of the batch maximum, with a floor of 8 so a nearly transparent
+    // plate does not classify every vertex as body.
     const int bodyAlphaThreshold = std::max(8, (maxBatchAlpha * 5 + 5) / 6);
     const float alphaKeep = 1.0f - textGlowAlpha * .20f;
     const float brightnessBoost = 1.0f + textGlowAlpha * .30f;
 
-    // Only the bright text body should become translucent. Dark outline/shadow
-    // pixels stay solid so readability does not collapse when text glow is on.
+    // Only the bright text body becomes translucent. Dark outline and shadow
+    // pixels stay solid, so readability holds when text glow is on.
     for (int i = vtxStart; i < vtxEnd; ++i)
     {
         ImU32 c = drawList->VtxBuffer[i].col;
@@ -82,9 +118,9 @@ static void ApplyTextTransparency(ImDrawList* drawList,
 
         if (glowText && isTextFill)
         {
-            // Scale all channels uniformly so the brightest channel just
-            // reaches 255 - this preserves hue instead of clipping individual
-            // channels to white independently.
+            // Scale all channels uniformly so the brightest one just reaches
+            // 255. Clipping channels independently would shift the hue toward
+            // white.
             float scale = (maxCh > 0) ? std::min(brightnessBoost, 255.0f / (float)maxCh) : 1.0f;
             cr = (int)(cr * scale);
             cg = (int)(cg * scale);
@@ -110,6 +146,9 @@ static void BoostSaturation(ImVec4& c, float amount)
     c.z = std::clamp(gray + (c.z - gray) * amount, .0f, 1.0f);
 }
 
+// Support tint: the one accent the outline, shadow and glow layers of a text role
+// share. The role's own gradient is taken at its midpoint, pulled toward the tier
+// highlight by highlightMix, then saturated so it stays a color instead of a grey.
 static ImVec4 DeriveSupportTint(const ImVec4& left,
                                 const ImVec4& right,
                                 const Settings::Color3& highlight,
@@ -123,6 +162,9 @@ static ImVec4 DeriveSupportTint(const ImVec4& left,
     return support;
 }
 
+// Pack a support tint into a draw color. tintFactor scales the RGB toward black:
+// 0 gives a plain black outline or shadow, 1 gives the full tint. alpha is the
+// caller's already-faded opacity.
 static ImU32 PackSupportTint(const ImVec4& tint, float tintFactor, float alpha)
 {
     tintFactor = std::clamp(tintFactor, .0f, 1.0f);
@@ -133,6 +175,14 @@ static ImU32 PackSupportTint(const ImVec4& tint, float tintFactor, float alpha)
                                                  alpha));
 }
 
+// One helper per EffectType, all with the same signature, so the switch in
+// ApplyTextEffect stays a flat dispatch. WithOutlineGlow draws the outline and its
+// optional glow rings under the effect's own fill. ParamOr supplies the effect's
+// built-in default for an INI parameter left at 0. Where a.strength appears it
+// scales that effect's amplitude or peak intensity only, never its rate or period,
+// so a quiet tier stays slow-and-soft instead of slow-and-invisible. The gradient
+// effects, Aurora and Enchant take no strength at all: their appearance follows
+// the tier colors and the INI parameters alone.
 static void ApplyNone(
     ImDrawList* dl, ImFont* font, float sz, ImVec2 pos, const char* text, const EffectArgs& a)
 {
@@ -481,6 +531,18 @@ static void ApplyElectric(
 }
 }  // namespace
 
+// Five passes, in this order, all into the caller's current splitter channel:
+//
+//   1. inner directional outline (dualOutline), under the fill
+//   2. the selected effect, which also draws the outer outline and its glow
+//   3. text-body alpha and brightness shaping (shine->innerTextAlpha/textGlowAlpha)
+//   4. the top-edge shine overlay (shine->enabled)
+//   5. per-glyph wave displacement of every vertex this call added (wave->enabled)
+//
+// The four trailing pointers are all optional; a null one skips its pass. The
+// textSizeScale and alpha parameters are currently unused here: every color is
+// already faded by the caller, and each effect derives its own geometry from
+// fontSize.
 void ApplyTextEffect(ImDrawList* drawList,
                      ImFont* font,
                      float fontSize,
@@ -502,7 +564,7 @@ void ApplyTextEffect(ImDrawList* drawList,
                      const TextEffects::WaveParams* wave,
                      const TextEffects::ShineParams* shine)
 {
-    // Capture vertex count before rendering for wave displacement
+    // Vertex count before drawing; the wave pass displaces only the range added here.
     const int vtxBefore = drawList->VtxBuffer.Size;
 
     EffectArgs args{effect,
@@ -517,11 +579,10 @@ void ApplyTextEffect(ImDrawList* drawList,
                     outlineGlow ? *outlineGlow : TextEffects::OutlineGlowParams{},
                     dualOutline ? *dualOutline : TextEffects::DualOutlineParams{}};
 
-    // Inner outline BELOW the fill. Its 8 sub-pixel-offset stamps overlap the
-    // glyph interior; drawn after the fill they composited into a ~50% static
-    // mid-dark film that repainted over every animated effect each frame,
-    // halving the effect's contrast. Under the fill, only the rim survives --
-    // which is all it was ever meant to be.
+    // The inner outline must be drawn BELOW the fill. Its 8 sub-pixel-offset
+    // stamps overlap the glyph interior, so drawing it after the fill lays a
+    // roughly 50% static mid-dark film over every animated effect and halves
+    // the effect's contrast. Under the fill, only the rim shows.
     if (args.dualOutline.enabled)
     {
         TextEffects::DrawDirectionalInnerOutline(drawList,
@@ -600,7 +661,7 @@ void ApplyTextEffect(ImDrawList* drawList,
             break;
     }
 
-    // Apply text-body alpha shaping after all fill/outline vertices have been emitted.
+    // Text-body alpha shaping runs after every fill and outline vertex is emitted.
     if (shine)
     {
         ApplyTextTransparency(drawList, vtxBefore, shine->innerTextAlpha, shine->textGlowAlpha);
@@ -613,13 +674,13 @@ void ApplyTextEffect(ImDrawList* drawList,
             drawList, font, fontSize, pos, text, shine->intensity, shine->falloff, IM_COL32_WHITE);
     }
 
-    // Apply per-glyph wave displacement to all vertices added during this call
+    // Per-glyph wave displacement, applied to every vertex added by this call.
     if (wave && wave->enabled)
     {
         const int vtxAfter = drawList->VtxBuffer.Size;
         if (vtxAfter > vtxBefore)
         {
-            // Compute bounding box of all added vertices
+            // Horizontal bounding box of the added vertices.
             float bbMinX = FLT_MAX, bbMaxX = -FLT_MAX;
             for (int i = vtxBefore; i < vtxAfter; ++i)
             {
@@ -643,13 +704,17 @@ void ApplyTextEffect(ImDrawList* drawList,
     }
 }
 
-// Build outline glow params from snapshot and tier color.
+// Build outline glow params from snapshot and tier color. allowed is the caller's
+// per-actor gate (style.outlineGlowAllowed); when it or EnableOutlineGlow is false
+// the result is disabled and every other field stays at its default, so the caller
+// must test enabled before passing the struct on.
 static TextEffects::OutlineGlowParams BuildOutlineGlow(const RenderSettingsSnapshot& snap,
                                                        const ImVec4& supportTint,
-                                                       float alpha)
+                                                       float alpha,
+                                                       bool allowed)
 {
     TextEffects::OutlineGlowParams glow;
-    glow.enabled = snap.enableOutlineGlow;
+    glow.enabled = allowed && snap.enableOutlineGlow;
     if (!glow.enabled)
     {
         return glow;
@@ -663,10 +728,9 @@ static TextEffects::OutlineGlowParams BuildOutlineGlow(const RenderSettingsSnaps
     float gg = snap.outlineGlowG;
     float gb = snap.outlineGlowB;
 
-    // Optionally tint toward tier color. Near-fully tier-colored (85%): any
-    // white majority here stacks with the bloom and shine into the whitewash
-    // the halo keeps getting blamed for; the remaining 15% white just lifts
-    // luminance a touch.
+    // Optional tint toward the tier color, at 85%. A larger white share stacks
+    // with the bloom and the shine into a whitewash; the remaining 15% white
+    // only lifts luminance.
     if (snap.outlineGlowTierTint)
     {
         float t = .85f;  // blend 85% tier color into the glow
@@ -704,8 +768,8 @@ static TextEffects::DualOutlineParams BuildDualOutline(const RenderSettingsSnaps
     return dual;
 }
 
-// Build wave displacement params from snapshot and style.  Wave is a
-// decorative tier visual -- player / special titles only.
+// Build wave displacement params from the snapshot and style.  Wave is a
+// decorative tier visual: player and special titles only.
 static TextEffects::WaveParams BuildWaveParams(const RenderSettingsSnapshot& snap,
                                                const LabelStyle& style,
                                                float time)
@@ -738,6 +802,8 @@ static TextEffects::ShineParams BuildShineParams(const RenderSettingsSnapshot& s
     return shine;
 }
 
+// Lift a text color into a glow color: saturate first, then scale brightness, so a
+// near-grey tier still tints its own veil instead of washing out to white.
 static ImVec4 PrepareMistTint(ImVec4 tint, float brightnessScale, float saturationBoost)
 {
     BoostSaturation(tint, saturationBoost);
@@ -756,6 +822,10 @@ static ImU32 PackGlowTint(const ImVec4& tint, float alpha)
                                                  std::clamp(alpha, .0f, 1.0f)));
 }
 
+// Draw the background glow behind a plate: one broad wash, a central ribbon,
+// three cores, then a table of soft lobes. All of it is layered alpha on the
+// draw list; nothing reads the scene. gpuGlow selects the wider, brighter
+// tuning that survives the GPU blur pass.
 static void DrawMistVeil(ImDrawList* dl,
                          const ImVec2& min,
                          const ImVec2& max,
@@ -772,15 +842,20 @@ static void DrawMistVeil(ImDrawList* dl,
         return;
     }
 
+    // One soft disc of the background glow. All values are relative to the
+    // expanded veil box built below, so a lobe keeps its place at any plate size.
     struct MistLobe
     {
-        float offsetX;
-        float offsetY;
-        float radiusMul;
-        float alphaMul;
-        float sideMix;
+        float offsetX;    // Center offset from box center, in half-widths
+        float offsetY;    // Center offset from box center, in units of 0.6 * height
+        float radiusMul;  // Multiple of lobeRadius
+        float alphaMul;   // Fraction of baseAlpha
+        float sideMix;    // -1 = full leftTint, 0 = centerTint, +1 = full rightTint
     };
 
+    // gpuGlow selects the table. The CPU table is tighter and dimmer because
+    // that path gets no GPU blur pass, and wider, brighter lobes would read as
+    // hard circles. The same compensation scales the core alphas below by .82.
     static constexpr MistLobe kGpuLobes[] = {
         {-0.56f, .05f, 1.08f, .14f, -.94f},
         {-0.34f, -.17f, .92f, .20f, -.62f},
@@ -811,7 +886,7 @@ static void DrawMistVeil(ImDrawList* dl,
     const float bottom = center.y + height * .5f;
     const float round = std::max(10.0f, height * .74f);
 
-    // Broad wash that ties the lobes together into a single fog bank.
+    // Broad wash that ties the separate lobes into one continuous field.
     dl->AddRectFilled(ImVec2(left - expandX * .10f, top - expandY * .12f),
                       ImVec2(right + expandX * .10f, bottom + expandY * .12f),
                       PackGlowTint(centerTint, baseAlpha * (gpuGlow ? .08f : .06f)),
@@ -865,6 +940,11 @@ static void DrawMistVeil(ImDrawList* dl,
     }
 }
 
+// Lay the mist veil up to three times, each with its own alpha weight: over the
+// whole plate box, over the title row when a title is visible, and over the main
+// line. Every veil goes into channel 0 - the glow-capture channel when the GPU
+// path is live, the back channel when it is not. No-op when glow is off, when
+// GlowIntensity is 0, or when the tier forbids glow.
 void DrawBackgroundGlow(ImDrawList* dl,
                         const LabelStyle& style,
                         const LabelLayout& layout,
@@ -889,8 +969,8 @@ void DrawBackgroundGlow(ImDrawList* dl,
     const float intensityScale = .58f + snap.glowIntensity * .56f;
     const float specialBoost = style.specialTitle ? 1.18f : 1.0f;
 
-    // Background mist should read as colored fog from the actual name text,
-    // not a blended white-ish support plate from title/level accents.
+    // The glow takes its color from the name text, not from the blended
+    // title/level support accents, which would wash it toward white.
     const ImVec4 nameMidTint = MixVec4(style.LcName, style.RcName, .5f);
     const ImVec4 mistCenterTint = PrepareMistTint(nameMidTint, 1.10f, 1.10f);
     const ImVec4 mistLeftTint = PrepareMistTint(style.LcName, 1.14f, 1.12f);
@@ -968,7 +1048,7 @@ static std::vector<std::string> CollectDrawableOrnaments(const std::string& raw,
 
 // Geometry of the ornament block on either side of the nameplate.  Computed
 // once per label so DrawOrnaments and the particle-aura sizer agree on the
-// space the ornaments occupy.  All fields are zero / nullptr when the
+// space the ornaments occupy.  All fields are zero or nullptr when the
 // ornaments are not visible for this label.
 struct OrnamentMetrics
 {
@@ -979,13 +1059,18 @@ struct OrnamentMetrics
     float ornamentSize = .0f;
     float totalSpacing = .0f;
     float ornamentCharGap = .0f;
-    float leftExtent = .0f;   ///< px occupied left of nameplate (spacing + chars + gaps)
-    float rightExtent = .0f;  ///< px occupied right of nameplate
+    float leftExtent = .0f;   // px occupied left of nameplate (spacing + chars + gaps)
+    float rightExtent = .0f;  // px occupied right of nameplate
 };
 
-// Mirror DrawOrnaments' visibility + sizing logic to produce metrics without
-// drawing.  Used by both DrawOrnaments (to skip duplicate work) and the
-// particle-aura sizer (so particles can wrap the ornaments).
+// Run DrawOrnaments' visibility and sizing logic without drawing.  Used by
+// DrawOrnaments, which then skips the duplicate work, and by the particle-aura
+// sizer, so the particles can wrap the ornaments.
+//
+// Ornaments are player-only: an NPC gets them only through a special title with
+// ForceOrnaments.  They also need the ornament font, so an empty OrnamentFontPath,
+// an unbuilt ornament font slot, or a string whose every character is missing from
+// that font returns an unshown result and the plate draws without ornaments.
 static OrnamentMetrics ComputeOrnamentMetrics(const ActorDrawData& d,
                                               const LabelStyle& style,
                                               const LabelLayout& layout,
@@ -1063,21 +1148,22 @@ static OrnamentMetrics ComputeOrnamentMetrics(const ActorDrawData& d,
     return m;
 }
 
-// Per-weather-type emission tuning. The aura layout/motion are decided in
-// TextEffectsParticle; these scalars only nudge spread/size/speed/count so each
-// type sits well in its radial band. Order is independent of the enum -- the
-// `style` field is the link, the `token` is what `ParticleTypes` matches.
+// Per-type particle emission tuning. Aura layout and motion are decided in
+// TextEffectsParticle; these scalars only adjust spread, size, speed and count
+// so each type sits well in its radial band. Row order is independent of the
+// enum: the style field is the link, and the token is what the per-tier
+// ParticleTypes key matches.
 struct ParticleTypeSpec
 {
     Settings::ParticleStyle style;
-    const char* token;  ///< Lowercase comparison happens at match time
+    const char* token;  // Must be lowercase: only the INI side is lowercased at match time
     float spreadXScale;
     float spreadYScale;
     float sizeScale;
     float speedScale;
-    float countScale;   ///< Multiplies boostedCount (with tier weight; clamped per type)
-    int minCount = 4;   ///< Per-type count floor (scaled down by whisper weights < 1)
-    int maxCount = 96;  ///< Per-type count cap -- solitary accents (moon/planet) set 2
+    float countScale;   // Multiplies boostedCount (with tier weight; clamped per type)
+    int minCount = 4;   // Per-type count floor (scaled down by weights below 1)
+    int maxCount = 96;  // Per-type count cap - single-accent types (moon/planet) set 2
 };
 
 static constexpr int kParticleTypeCount = Settings::kParticleStyleCount;
@@ -1092,7 +1178,6 @@ static constexpr ParticleTypeSpec kParticleTypes[kParticleTypeCount] = {
     {Settings::ParticleStyle::CherryBlossom, "cherryblossom", 1.00f, 1.05f, 1.00f, 0.70f, 0.90f},
     {Settings::ParticleStyle::Dust, "dust", 1.00f, 1.00f, 0.80f, 0.40f, 1.00f},
     {Settings::ParticleStyle::Mote, "mote", 1.00f, 1.00f, 1.00f, 0.50f, 0.90f},
-    // -- 2026-07 sprite expansion --
     {Settings::ParticleStyle::Arcane, "arcane", 1.05f, 1.00f, 1.05f, 0.85f, 0.70f},
     {Settings::ParticleStyle::Ash, "ash", 1.00f, 1.05f, 0.90f, 0.80f, 1.00f},
     {Settings::ParticleStyle::Bat, "bat", 1.15f, 1.00f, 1.15f, 1.10f, 0.60f, 3},
@@ -1125,8 +1210,8 @@ static constexpr ParticleTypeSpec kParticleTypes[kParticleTypeCount] = {
     {Settings::ParticleStyle::Runes, "runes", 1.05f, 1.00f, 1.05f, 0.80f, 0.70f},
     {Settings::ParticleStyle::Sand, "sand", 1.15f, 0.95f, 0.90f, 1.00f, 0.90f},
 };
-// Every style exactly once, with the canonical token from Settings -- a row
-// drifting out of sync with the enum is a compile error, not a silent miss.
+// Every style exactly once, with the canonical token from Settings.  A row out
+// of sync with the enum is a compile error, not a silently missing style.
 static_assert(
     []() consteval
     {
@@ -1154,12 +1239,13 @@ static_assert(
     }(),
     "kParticleTypes must cover every ParticleStyle once, with canonical tokens");
 
-// Relative weight for `token` within `particleTypes`. Each comma-separated entry
-// is "type" or "type:weight" (a bare type = weight 1). Case-insensitive,
-// whitespace-trimmed, exact type-token match (avoids substring collisions).
-// Returns 0 when the type is not listed; a listed type's weight is clamped to
-// [kMinTypeWeight, kMaxTypeWeight]. Weights set the RATIO of each type within a
-// tier; ComputeParticleConfig mean-normalizes them so the total density holds.
+// Relative weight of a token within a ParticleTypes list. Each comma-separated
+// entry is "type" or "type:weight", and a bare type means weight 1. Matching is
+// case-insensitive, whitespace-trimmed and on the whole token, so substrings do
+// not collide. Returns 0 when the type is not listed; a listed weight is clamped
+// to [kMinTypeWeight, kMaxTypeWeight], and a weight suffix that does not parse
+// falls back to 1. Weights set the RATIO between types within a tier;
+// ComputeParticleConfig mean-normalizes them so total density holds.
 static float ParticleTypeWeight(const std::string& particleTypes, const char* token)
 {
     constexpr float kMinTypeWeight = 0.1f;
@@ -1227,7 +1313,7 @@ struct ParticleConfig
     float boostedSize;
     float boostedAlpha;
     bool enabled[kParticleTypeCount];
-    float weight[kParticleTypeCount];  ///< Mean-normalized per-type ratio weight
+    float weight[kParticleTypeCount];  // Mean-normalized per-type ratio weight
     int enabledStyles;
 };
 
@@ -1243,10 +1329,12 @@ static ParticleConfig ComputeParticleConfig(const ActorDrawData& d,
     const Settings::TierDefinition& tier = *style.tier;
     const uint16_t lv = (uint16_t)std::min<int>(d.level, 9999);
 
-    // Per-tier ParticleTypes is the sole source of truth for which styles render.
-    // A tier with empty / "None" particle types renders no particles unless a
-    // special title forces them on.  Tier particle auras are a player-only
-    // flourish, mirroring the ornament gate.
+    // The per-tier ParticleTypes key is the only source for which styles render,
+    // for a special title as well.  A tier with empty or "None" particle types
+    // matches no token, so it renders nothing even under ForceParticles: that
+    // flag only bypasses the player, master-enable and tier-allows gates, and
+    // adds no types of its own.  Tier particle auras are otherwise player-only,
+    // the same gate the ornaments use.
     const bool tierHasParticles = !tier.particleTypes.empty() && tier.particleTypes != "None";
     cfg.showParticles =
         ((d.isPlayer && snap.enableParticleAura && tierHasParticles && style.tierAllowsParticles) ||
@@ -1269,24 +1357,24 @@ static ParticleConfig ComputeParticleConfig(const ActorDrawData& d,
     {
         const Settings::Color3& pc = tier.particleColor.value_or(tier.highlightColor);
         cfg.particleColor = ImGui::ColorConvertFloat4ToU32(ImVec4(pc.r, pc.g, pc.b, 1.0f));
-        // Secondary color from the tier's right gradient for a gradient particle cloud
+        // Secondary color from the tier's right gradient, giving a two-color cloud
         cfg.particleColorSecondary = ImGui::ColorConvertFloat4ToU32(
             ImVec4(style.RcName.x, style.RcName.y, style.RcName.z, 1.0f));
     }
 
     const float pSpacingScale = layout.nameFontSize / layout.fontName->FontSize;
 
-    // Wrap the particle aura around ornaments too when they are visible.
-    // Symmetric inflation keeps the cloud centered on the actor's head bone;
-    // shifting the center for asymmetric ornament strings would visibly drift.
+    // Widen the aura to cover the ornaments when they are visible. The
+    // inflation is symmetric, which keeps the cloud centered on the actor's
+    // head bone; recentering for an asymmetric ornament string would drift.
     const float ornHalfInflate = std::max(ornMetrics.leftExtent, ornMetrics.rightExtent);
 
     cfg.spreadX =
         layout.nameplateWidth * .5f + ornHalfInflate + snap.particleSpread * 1.55f * pSpacingScale;
 
-    // Guarantee the vertical envelope still covers the ornament glyphs even
-    // when particleSpread is dialed low and ornaments are scaled up (e.g. the
-    // 1.3x bump for special titles).
+    // The vertical envelope must still cover the ornament glyphs when
+    // particleSpread is low and the ornaments are scaled up, such as by the
+    // 1.3x bump for special titles.
     const float baseSpreadY = snap.particleSpread * 1.22f * pSpacingScale;
     const float ornVerticalPad = ornMetrics.shown ? ornMetrics.ornamentSize * .5f + 2.0f : .0f;
     cfg.spreadY = layout.nameplateHeight * .5f + std::max(baseSpreadY, ornVerticalPad);
@@ -1297,6 +1385,13 @@ static ParticleConfig ComputeParticleConfig(const ActorDrawData& d,
     {
         tierBoost = static_cast<float>(style.tierIdx) / static_cast<float>(snap.tiers.size() - 1);
     }
+    // Tier and level boost. The level ramp starts at level 100 and saturates at
+    // level 500. Tier position and level ramp contribute the same share each,
+    // and the three channels rise at different rates, so a high tier gains
+    // mostly in count: the count multiplier spans 1.0 to 1.6, the size
+    // multiplier 1.12 to 1.60 and the alpha multiplier 1.02 to 1.38. The count
+    // never falls below the configured particleCount, and the 96 ceiling
+    // duplicates the ParticleTypeSpec::maxCount default declared above.
     float levelBoost = TextEffects::Saturate((static_cast<float>(lv) - 100.0f) / 400.0f);
     float particleBoost = 1.0f + .3f * tierBoost + .3f * levelBoost;
     cfg.boostedCount =
@@ -1320,9 +1415,10 @@ static ParticleConfig ComputeParticleConfig(const ActorDrawData& d,
             sumWeights += cfg.weight[i];
         }
     }
-    // Mean-normalize the weights so a tier's TOTAL particle budget stays ~constant
-    // and equal weights reproduce the legacy per-type count exactly (norm == 1);
-    // unequal weights only redistribute density by ratio.
+    // Mean-normalize the weights so a tier's TOTAL particle budget stays about
+    // constant. Equal weights normalize to exactly 1, so an unweighted tier
+    // keeps the plain per-type count; unequal weights only redistribute density
+    // by ratio.
     if (cfg.enabledStyles > 0 && sumWeights > .0f)
     {
         const float norm = static_cast<float>(cfg.enabledStyles) / sumWeights;
@@ -1360,9 +1456,8 @@ void DrawParticles(ImDrawList* dl,
 
     const int blendMode = snap.particleBlendMode;
 
-    // One aura pass per enabled weather type. Each type's spec nudges
-    // spread/size/speed/count; the motion itself is decided in
-    // TextEffects::DrawParticleAura by the style.
+    // One aura pass per enabled type. The spec adjusts spread, size, speed and
+    // count; TextEffects::DrawParticleAura decides the motion from the style.
     for (int i = 0; i < kParticleTypeCount; ++i)
     {
         if (!cfg.enabled[i])
@@ -1370,11 +1465,11 @@ void DrawParticles(ImDrawList* dl,
             continue;
         }
         const ParticleTypeSpec& spec = kParticleTypes[i];
-        // The floor scales with a sub-1 weight so whisper ratios (e.g.
-        // Firefly:10, Glitter:0.1) are honored instead of silently snapping
-        // back to the full per-type floor; equal weights mean-normalize to
-        // exactly 1.0, so unweighted tiers keep their legacy floors. The cap
-        // keeps solitary accents (moon/planet) at accent counts by design.
+        // The floor scales with a weight below 1, so a very small ratio (for
+        // example Firefly:10, Glitter:0.1) is honored instead of snapping back
+        // to the full per-type floor. Equal weights mean-normalize to exactly
+        // 1.0, so an unweighted tier keeps the plain floor. The cap holds
+        // single-accent types (moon/planet) at accent counts.
         const int lo = (std::max)(1,
                                   static_cast<int>(static_cast<float>(spec.minCount) *
                                                    std::min(1.0f, cfg.weight[i])));
@@ -1444,7 +1539,10 @@ static std::vector<std::string> CollectDrawableOrnaments(const std::string& raw,
     return out;
 }
 
-// Draw decorative ornament characters beside the nameplate.
+// Draw decorative ornament characters beside the nameplate.  metrics must be the
+// result ComputeOrnamentMetrics produced for this label.  d and lodEffectsFactor
+// stay unread here because the visibility gate they feed already ran in that
+// call; time stays unread because the effect phase comes from style.phase01.
 void DrawOrnaments(ImDrawList* dl,
                    const ActorDrawData& d,
                    const LabelStyle& style,
@@ -1470,8 +1568,8 @@ void DrawOrnaments(ImDrawList* dl,
     const float ornamentCharGap = metrics.ornamentCharGap;
     const float textSizeScale = layout.nameFontSize / layout.fontName->FontSize;
 
-    // Per-tier ornament color overrides give ornaments their own material.
-    // Special titles keep their dedicated color (already stored in style.LcName/RcName).
+    // Per-tier ornament color overrides let the ornaments differ from the text.
+    // A special title keeps its own color, already in style.LcName / style.RcName.
     ImVec4 ornLv, ornRv;
     auto MixColors = [](const ImVec4& a, const ImVec4& b, float t)
     {
@@ -1544,7 +1642,7 @@ void DrawOrnaments(ImDrawList* dl,
     const int chBack = gpuGlow ? 1 : 0;
     const int chFront = gpuGlow ? 2 : 1;
 
-    auto ornGlow = BuildOutlineGlow(snap, ornSupportTint, style.alpha);
+    auto ornGlow = BuildOutlineGlow(snap, ornSupportTint, style.alpha, style.outlineGlowAllowed);
     auto ornDual = BuildDualOutline(snap, ornSupportTint, style.alpha);
     auto ornShine = BuildShineParams(snap, style);
     const bool ornNeedsTextAdjust =
@@ -1606,11 +1704,11 @@ void DrawOrnaments(ImDrawList* dl,
         (snap.ornamentAnchorToMainLine ? layout.mainLineCenterY : layout.nameplateCenter.y) +
         snap.ornamentOffsetY * textSizeScale;
 
-    // Center the flourish INK on the anchor rather than the em box: the anchor
-    // (mainLineCenterY) is the name's tight ink center, but ornament fonts often
-    // park their ink low in the em box, which rendered the flourishes visibly
-    // below the name's optical center. One shared offset across both sides keeps
-    // the whole set on a common baseline.
+    // Center the ornament INK on the anchor, not its em box: the anchor
+    // (mainLineCenterY) is the name's tight ink center, and ornament fonts often
+    // park their ink low in the em box, which would place the ornaments below
+    // the name's optical center. One shared offset for both sides keeps the
+    // whole set on a common baseline.
     float ornInkTop = +FLT_MAX;
     float ornInkBottom = -FLT_MAX;
     auto accumulateInk = [&](const std::vector<std::string>& chars)
@@ -1667,9 +1765,9 @@ void DrawOrnaments(ImDrawList* dl,
 }
 
 // Draw the particle aura (back layer) then the ornament glyphs for one
-// nameplate, computing the shared ornament block geometry a single time so the
-// particle-aura sizer and the ornament draw pass agree without rebuilding it
-// twice per label.
+// nameplate.  The shared ornament block geometry is computed once, so the
+// particle-aura sizer and the ornament draw pass agree and no label rebuilds
+// it twice.
 void DrawParticlesAndOrnaments(ImDrawList* dl,
                                const ActorDrawData& d,
                                const LabelStyle& style,
@@ -1785,7 +1883,8 @@ void DrawTitleText(ImDrawList* dl,
     float textSizeScale = layout.nameFontSize / layout.fontName->FontSize;
     ImU32 titleOutline = PackSupportTint(
         style.supportTitle, snap.outlineColorTint, lodTitleAlphaFinal * snap.outlineAlpha);
-    auto titleGlow = BuildOutlineGlow(snap, style.supportTitle, lodTitleAlphaFinal);
+    auto titleGlow =
+        BuildOutlineGlow(snap, style.supportTitle, lodTitleAlphaFinal, style.outlineGlowAllowed);
     auto titleDual = BuildDualOutline(snap, style.supportTitle, lodTitleAlphaFinal);
     auto titleWave = BuildWaveParams(snap, style, (float)ImGui::GetTime());
     auto titleShine = BuildShineParams(snap, style);
@@ -1814,10 +1913,10 @@ void DrawTitleText(ImDrawList* dl,
                     titleNeedsTextAdjust ? &titleShine : nullptr);
 }
 
-// Render a row of nameplate segments at the supplied line geometry.  Shared
-// by `DrawMainLineSegments` (main row) and `DrawInfoLineSegments` (info row);
-// both rows reuse the same per-actor style/effect derivations, only the
-// segment vector + line Y/width/height vary.
+// Render a row of nameplate segments at the supplied line geometry.  Shared by
+// DrawMainLineSegments and DrawInfoLineSegments; both rows reuse the same
+// per-actor style and effect derivations, and only the segment vector and the
+// line Y, width and height differ.
 static void DrawSegmentRow(ImDrawList* dl,
                            const LabelStyle& style,
                            const LabelLayout& layout,
@@ -1830,11 +1929,12 @@ static void DrawSegmentRow(ImDrawList* dl,
                            const RenderSettingsSnapshot& snap)
 {
     const float textSizeScale = layout.nameFontSize / layout.fontName->FontSize;
-    const float spacingScale = textSizeScale;
     const bool gpuGlow = snap.enableGlow && TextPostProcess::IsInitialized();
     const int chFront = gpuGlow ? 2 : 1;
-    auto nameGlow = BuildOutlineGlow(snap, style.supportName, style.alpha);
-    auto levelGlow = BuildOutlineGlow(snap, style.supportLevel, style.levelAlpha);
+    auto nameGlow =
+        BuildOutlineGlow(snap, style.supportName, style.alpha, style.outlineGlowAllowed);
+    auto levelGlow =
+        BuildOutlineGlow(snap, style.supportLevel, style.levelAlpha, style.outlineGlowAllowed);
     auto nameDual = BuildDualOutline(snap, style.supportName, style.alpha);
     auto levelDual = BuildDualOutline(snap, style.supportLevel, style.levelAlpha);
     ImU32 nameOutline =
@@ -1863,8 +1963,12 @@ static void DrawSegmentRow(ImDrawList* dl,
             continue;
         }
 
-        float vOffset = (layout.mainLineHeight - seg.size.y) * .5f;
+        float vOffset = (lineHeight - seg.size.y) * .5f;
         ImVec2 pos = ImVec2(currentPos.x, currentPos.y + vOffset);
+        const int segmentVertexStart = dl->VtxBuffer.Size;
+        const float segmentSpacingScale = seg.font && seg.font->FontSize > .0f
+                                              ? seg.fontSize / seg.font->FontSize
+                                              : textSizeScale;
 
         if (snap.enableGlow && snap.glowIntensity > .0f && style.tierAllowsGlow)
         {
@@ -1922,8 +2026,8 @@ static void DrawSegmentRow(ImDrawList* dl,
                                            segShadow,
                                            std::cos(ang),
                                            std::sin(ang),
-                                           snap.softShadowDistance * spacingScale,
-                                           snap.softShadowSoftness * spacingScale,
+                                           snap.softShadowDistance * segmentSpacingScale,
+                                           snap.softShadowSoftness * segmentSpacingScale,
                                            snap.softShadowOpacity,
                                            snap.softShadowSamples);
         }
@@ -1931,13 +2035,13 @@ static void DrawSegmentRow(ImDrawList* dl,
         {
             dl->AddText(seg.font,
                         seg.fontSize,
-                        ImVec2(pos.x + snap.mainShadowOffsetX * spacingScale,
-                               pos.y + snap.mainShadowOffsetY * spacingScale),
+                        ImVec2(pos.x + snap.mainShadowOffsetX * segmentSpacingScale,
+                               pos.y + snap.mainShadowOffsetY * segmentSpacingScale),
                         segShadow,
                         seg.displayText.c_str());
         }
 
-        float segOutlineWidth = seg.isLevel ? style.levelOutlineWidth : style.nameOutlineWidth;
+        const float segOutlineWidth = style.CalcOutlineWidth(seg.fontSize, snap);
 
         if (seg.isLevel)
         {
@@ -1954,7 +2058,7 @@ static void DrawSegmentRow(ImDrawList* dl,
                             segOutlineWidth,
                             style.phase01,
                             style.strength,
-                            textSizeScale,
+                            segmentSpacingScale,
                             style.levelAlpha,
                             fastOutlines,
                             levelGlow.enabled ? &levelGlow : nullptr,
@@ -1977,7 +2081,7 @@ static void DrawSegmentRow(ImDrawList* dl,
                             segOutlineWidth,
                             style.phase01,
                             style.strength,
-                            textSizeScale,
+                            segmentSpacingScale,
                             style.alpha,
                             fastOutlines,
                             nameGlow.enabled ? &nameGlow : nullptr,
@@ -1986,6 +2090,7 @@ static void DrawSegmentRow(ImDrawList* dl,
                             mainNeedsTextAdjust ? &mainShine : nullptr);
         }
 
+        ScaleNewVerticesX(dl, segmentVertexStart, pos.x, seg.horizontalScale);
         currentPos.x += seg.size.x + layout.segmentPadding;
     }
 }
@@ -2010,10 +2115,10 @@ void DrawMainLineSegments(ImDrawList* dl,
                    snap);
 }
 
-// Render the contextual info row below the main line.  No-op when no info
-// segments survived drop-if-blank trimming.  Honors `style.infoAlphaMul`,
-// which the focus-target feature uses to hide the info row on ambient
-// (non-focused) actors and fade it in on the focused actor.
+// Render the info row below the main line.  No-op when no info segments
+// survived the drop-if-blank trim.  Honors style.infoAlphaMul, which the
+// focus-target feature uses to hide the info row on non-focused actors and
+// fade it in on the focused one.
 void DrawInfoLineSegments(ImDrawList* dl,
                           const LabelStyle& style,
                           const LabelLayout& layout,
@@ -2030,9 +2135,9 @@ void DrawInfoLineSegments(ImDrawList* dl,
         return;
     }
 
-    // Apply the info-row alpha multiplier to a local copy of style so the
-    // segment drawer's color packing picks up the reduced alpha without
-    // touching the caller's style (which is used by other rows).
+    // Apply the info-row alpha multiplier to a local copy of style, so the
+    // segment drawer's color packing sees the reduced alpha and the caller's
+    // style, which the other rows also use, stays unchanged.
     LabelStyle infoStyle = style;
     infoStyle.alpha *= style.infoAlphaMul;
     infoStyle.titleAlpha *= style.infoAlphaMul;
@@ -2050,39 +2155,46 @@ void DrawInfoLineSegments(ImDrawList* dl,
                    snap);
 }
 
-// Render resolved status badge icons around the main line.  Geometry was
-// fixed in BuildBadges; only alpha packing and the Deadly pulse happen per
-// frame here.  Badges follow the main row's alpha (distance fade, focus
-// ambient dim) rather than the info row's infoAlphaMul.  Each icon is a
-// duotone texture quad: a black drop-shadow pass for readability, then the
-// tinted icon (the duotone layer opacities live in the texture's alpha).
+// Render the resolved status badge icons.  BuildBadges fixed the geometry - one
+// row centered above the plate's top edge - so this pass only packs alpha and
+// adds the per-frame lighting: the Deadly pulse, the breathing player strip bed
+// and the player rim light.
+// Badges follow the main row's alpha (distance fade, focus dim) times
+// badgeAlphaMul, not the info row's infoAlphaMul.  Each icon is a duotone texture
+// quad: a lit icon draws a black drop-shadow pass and a soft-glow halo, then the
+// tinted icon; a muted icon draws the tinted quad, plus the rim-light pair when it
+// belongs to the player.  The duotone layer opacities live in the texture's alpha.
 void DrawBadges(ImDrawList* dl,
                 const LabelStyle& style,
                 const LabelLayout& layout,
                 ImDrawListSplitter* splitter,
                 bool /*fastOutlines*/,
-                const RenderSettingsSnapshot& snap)
+                const RenderSettingsSnapshot& snap,
+                bool restrainedWorld)
 {
     if (layout.badges.empty())
     {
         return;
     }
 
+    // restrainedWorld suppresses the glow geometry, but the badges still belong
+    // to the front channel of the active splitter topology.
     const bool gpuGlow = snap.enableGlow && TextPostProcess::IsInitialized();
     splitter->SetCurrentChannel(dl, gpuGlow ? 2 : 1);
+    RenderSampling::PushBadgeSampler(dl);
 
     const float spacingScale = layout.nameFontSize / layout.fontName->FontSize;
     const ImVec2 shadowOff(snap.mainShadowOffsetX * spacingScale * .5f,
                            snap.mainShadowOffsetY * spacingScale * .5f);
 
-    // Seat of Light: a soft breathing light bed behind the PLAYER strip only.
-    // Elevates the player block by register (ambient light) -- it never lights
-    // individual muted icons (their own draws below are unchanged). Additive
-    // Gaussian discs overlap into one pool that decays to zero at every edge
-    // (no plate). Skipped without a live soft-glow disc. Folds with the block
-    // via style.alpha * badgeAlphaMul so a Quiet-Frame pan retires it too.
-    if (layout.isPlayer && snap.icons.playerStripBedEnabled && !layout.badges.empty() &&
-        ParticleTextures::HasSoftGlow())
+    // Soft breathing light bed behind the PLAYER badge strip only. It lights
+    // the strip as a whole and never changes the individual muted icon draws
+    // below. Additive Gaussian discs overlap into one pool that decays to zero
+    // at every edge, so no plate edge is visible. Skipped when no soft-glow
+    // disc is available. Its alpha folds in style.alpha * badgeAlphaMul, so the
+    // camera-pan fade retires it with the rest of the block.
+    if (!restrainedWorld && layout.isPlayer && snap.icons.playerStripBedEnabled &&
+        !layout.badges.empty() && ParticleTextures::HasSoftGlow())
     {
         float minL = FLT_MAX, maxR = -FLT_MAX, rowH = .0f, cy = .0f;
         for (const auto& b : layout.badges)
@@ -2121,8 +2233,8 @@ void DrawBadges(ImDrawList* dl,
                                           std::clamp((int)(bedA * 255.0f), 0, 255));
             const float stripW = maxR - minL;
             const float edge = rowH * snap.icons.playerStripBedSize;
-            // Space disc centers ~one visible radius (edge/3) apart so the
-            // Gaussian cores overlap into a continuous pool at any bed size.
+            // Disc centers sit about one visible radius (edge/3) apart, so the
+            // cores overlap into a continuous pool at any bed size.
             const float spacing = std::max(1.0f, edge / 3.0f);
             const int count = std::max(2, static_cast<int>(std::ceil(stripW / spacing)) + 1);
             for (int i = 0; i < count; ++i)
@@ -2139,13 +2251,17 @@ void DrawBadges(ImDrawList* dl,
         float a = style.alpha * style.badgeAlphaMul;
         if (b.pulse && snap.icons.deadlyPulse)
         {
-            // 1.2 rad/s (~0.19 Hz, was 3.0 -> ~0.48 Hz): a slow warning
-            // breath, not a blink -- part of the calm-tempo pass.
+            // 1.2 rad/s, about 0.19 Hz: a slow warning breath, not a blink.
             a *= .75f + .25f * std::sin(static_cast<float>(ImGui::GetTime()) * 1.2f);
         }
 
-        // Muted (neutral/inactive) slots read as a subtle "off" state: drop
-        // alpha and desaturate toward luma so lit badges pop by comparison.
+        // IconOpacity applies to all status badges. A resting badge can use an
+        // additional alpha multiplier. The default multiplier keeps its alpha
+        // equal to an active badge.
+        a = (std::min)(1.0f, a * snap.icons.opacity);
+
+        // Muted (neutral or inactive) slots read as "off": optional alpha
+        // reduction and desaturation toward luma separate them from lit badges.
         Settings::Color3 c = b.color;
         if (b.muted)
         {
@@ -2156,10 +2272,6 @@ void DrawBadges(ImDrawList* dl,
             c.g += (luma - c.g) * k;
             c.b += (luma - c.b) * k;
         }
-        else
-        {
-            a = (std::min)(1.0f, a * snap.icons.opacity);  // lit-badge visibility gain
-        }
         if (a < .01f)
         {
             continue;
@@ -2169,9 +2281,8 @@ void DrawBadges(ImDrawList* dl,
         // leaves their RGB untouched and only applies the fade alpha.
         const ImU32 tint = b.fullColor ? ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, a))
                                        : ImGui::ColorConvertFloat4ToU32(ImVec4(c.r, c.g, c.b, a));
-        // Lit badges get a drop shadow (world contrast) plus a soft glow in the
-        // badge's own semantic color so the strip reads at a glance. Muted
-        // badges sit flat so the always-on strip stays calm.
+        // A lit badge gets a drop shadow, for contrast against the world, plus
+        // a soft glow in its own semantic color. A muted badge stays flat.
         if (!b.muted)
         {
             const ImU32 shadow =
@@ -2183,22 +2294,20 @@ void DrawBadges(ImDrawList* dl,
                          ImVec2(1, 1),
                          shadow);
 
-            // Colored glow: ONE featureless soft-glow disc in the badge's own
-            // semantic color -- a clean halo, not enlarged copies of the
-            // pictograph (which read as a doubled/ghosted "layered" glow). Same
-            // clean-light approach as the tier emblem backlight. The legacy
-            // two-copy halo is kept only as a fallback for when the soft-glow
-            // disc is unavailable (total texture failure), so a lit icon never
-            // loses its glow entirely.
-            if (!b.fullColor)
+            // Colored glow: one featureless halo in the badge's own semantic
+            // color, never enlarged copies of the pictograph, which read as a
+            // doubled, ghosted glow. Same approach as the tier emblem
+            // backlight. The two-copy halo below is the fallback for when the
+            // soft-glow disc is unavailable (total texture failure), so a lit
+            // icon never loses its glow entirely.
+            if (!restrainedWorld && !b.fullColor)
             {
                 const ImVec2 gc((b.pos.x + pMax.x) * .5f, (b.pos.y + pMax.y) * .5f);
                 if (ParticleTextures::HasSoftGlow())
                 {
-                    // Smooth feathered halo: three featureless soft-light discs
-                    // (the shared Gaussian) at widening scales that sum into one
-                    // soft gradient -- a feather in the badge's own color, never
-                    // copies of the pictograph (which would ghost).
+                    // Feathered halo: three featureless discs (the shared
+                    // Gaussian) at widening scales sum into one soft gradient in
+                    // the badge's own color, never copies of the pictograph.
                     const int gr = std::clamp(static_cast<int>(c.r * 255.0f), 0, 255);
                     const int gg = std::clamp(static_cast<int>(c.g * 255.0f), 0, 255);
                     const int gb = std::clamp(static_cast<int>(c.b * 255.0f), 0, 255);
@@ -2234,10 +2343,10 @@ void DrawBadges(ImDrawList* dl,
         }
         dl->AddImage(b.tex, b.pos, pMax, ImVec2(0, 0), ImVec2(1, 1), tint);
 
-        // B (Struck Metal): resting PLAYER icons read as struck studs -- a warm
-        // top rim + a carved bottom shadow overlaid on the muted icon. Player-
-        // only, muted-only (NPCs and lit icons untouched); alpha-blended, subtle.
-        if (b.muted && layout.isPlayer && snap.icons.playerRimLightEnabled)
+        // Rim light on resting player icons: a warm top rim plus a carved bottom
+        // shadow, both alpha-blended over the muted icon. Player only and muted
+        // only; NPC icons and lit icons are untouched.
+        if (!restrainedWorld && b.muted && layout.isPlayer && snap.icons.playerRimLightEnabled)
         {
             const float off = (std::max)(.5f, snap.icons.playerRimOffset * spacingScale);
             ImVec4 rim;
@@ -2281,35 +2390,40 @@ void DrawBadges(ImDrawList* dl,
             }
         }
     }
+    RenderSampling::PopSampler(dl);
 }
 
-// Draw the player tier emblem on its own row above the icon strip: a soft bloom
-// in the emblem's OWN colors (enlarged low-alpha copies) that gently breathes,
-// then the crisp emblem on top.  The status icons stay flat -- this is the one
-// badge with a glow.
+// Draw the rank emblem on its own row above the icon strip. A screen-space plate
+// gets a soft backlight in a near-neutral accent - EmblemBacklightColor when the
+// INI sets one, otherwise the tier name color pulled most of the way to its own
+// luma - while a restrained Graffito plane keeps only the crisp mark, so the
+// world inscription stays inscription.
 void DrawTierEmblem(ImDrawList* dl,
                     const LabelStyle& style,
                     const LabelLayout& layout,
                     float time,
                     ImDrawListSplitter* splitter,
-                    const RenderSettingsSnapshot& snap)
+                    const RenderSettingsSnapshot& snap,
+                    bool restrainedWorld)
 {
     if (!layout.tierEmblemShown || layout.tierEmblemTex == 0)
     {
         return;
     }
 
-    // Fold with the icon strip's alpha so a Quiet-Frame pan retires the whole
-    // "above the name" block together; keep the lit-badge visibility gain.
+    // Fold with the icon strip's alpha, so the camera-pan fade retires the whole
+    // block above the name together. EmblemCrispAlpha controls the rank mark.
     float a = style.alpha * style.badgeAlphaMul;
-    a = (std::min)(1.0f, a * snap.icons.opacity);
     if (a < .01f)
     {
         return;
     }
 
+    // Even without an emblem bloom, Graffito's crisp rank stays in the same
+    // front channel as its projected text.
     const bool gpuGlow = snap.enableGlow && TextPostProcess::IsInitialized();
     splitter->SetCurrentChannel(dl, gpuGlow ? 2 : 1);
+    RenderSampling::PushBadgeSampler(dl);
 
     const ImVec2 c(layout.tierEmblemPos.x + layout.tierEmblemSize.x * .5f,
                    layout.tierEmblemPos.y + layout.tierEmblemSize.y * .5f);
@@ -2333,9 +2447,16 @@ void DrawTierEmblem(ImDrawList* dl,
                      col);
     };
 
-    // Near-neutral accent for the backlight: an explicit INI value wins; else
-    // derive from the tier Name color, desaturated toward luma so the light
-    // reads as light (not a saturated wash) and never recolors cool slots.
+    if (restrainedWorld)
+    {
+        drawScaled(1.0f, a * snap.icons.emblemCrispAlpha);
+        RenderSampling::PopSampler(dl);
+        return;
+    }
+
+    // Near-neutral accent for the backlight: an explicit INI value wins,
+    // otherwise derive from the tier name color, desaturated toward luma so the
+    // backlight reads as light rather than as a saturated wash.
     const auto neutralAccent = [&]() -> ImVec4
     {
         if (snap.icons.emblemBacklightColor.has_value())
@@ -2354,9 +2475,9 @@ void DrawTierEmblem(ImDrawList* dl,
 
     if (snap.icons.emblemBacklightEnabled && ParticleTextures::HasSoftGlow())
     {
-        // One true featureless radial backlight (+ a tighter core), breathing
-        // on alpha only. DrawSoftGlow's `size` is the quad EDGE (visible radius
-        // ~1/3 of it), so the edge is a multiple of the emblem edge.
+        // Featureless radial backlight, breathing on alpha only. DrawSoftGlow's
+        // size argument is the quad EDGE, and the visible radius is about a
+        // third of it, so the edge is expressed as a multiple of the emblem edge.
         const float breathe =
             .78f + .22f * std::sin(time * 6.2831853f * snap.icons.emblemBacklightBreatheHz);
         const ImVec4 acc = neutralAccent();
@@ -2365,8 +2486,10 @@ void DrawTierEmblem(ImDrawList* dl,
         const int ab = std::clamp((int)(acc.z * 255.0f), 0, 255);
         const float edge = layout.tierEmblemSize.x * snap.icons.emblemBacklightSize;
 
-        // Smooth feathered backlight: three featureless discs at widening scales
-        // summing into one soft gradient halo (replaces a single tight disc + core).
+        // Feathered backlight: three featureless discs at widening scales sum
+        // into one soft gradient halo. The weights total 1.18, so the composited
+        // center reaches about 1.18x peak and EmblemBacklightAlpha does not map
+        // one-to-one to what is seen.
         const float peak = a * snap.icons.emblemBacklightAlpha * breathe;
         constexpr float kBScale[3] = {1.0f, .64f, .4f};
         constexpr float kBWeight[3] = {.34f, .40f, .44f};
@@ -2380,8 +2503,9 @@ void DrawTierEmblem(ImDrawList* dl,
         }
         if (snap.icons.emblemKeyFillEnabled)
         {
-            // Directional model: a warm KEY above-behind + a cooler FILL below,
-            // both featureless, breathing slightly out of phase -> a top-lit read.
+            // Directional model: a warm KEY above and behind, a cooler FILL
+            // below, both featureless and breathing slightly out of phase, which
+            // reads as top-lit.
             const float kfBreathe =
                 .82f +
                 .18f * std::sin(time * 6.2831853f * snap.icons.emblemBacklightBreatheHz + 1.3f);
@@ -2444,15 +2568,16 @@ void DrawTierEmblem(ImDrawList* dl,
     }
     else
     {
-        // Fallback: no soft-glow disc, or backlight disabled -> today's look
-        // EXACTLY (three enlarged art copies + 0.82 crisp). Never a glow-less
-        // emblem.
+        // Fallback when there is no soft-glow disc or the backlight is disabled:
+        // three enlarged copies of the emblem art, then the configured crisp
+        // mark, so a texture failure never leaves a screen-space emblem flat.
         const float breathe = .78f + .22f * std::sin(time * 1.05f);
         drawScaled(1.62f, a * .14f * breathe);
         drawScaled(1.34f, a * .24f * breathe);
         drawScaled(1.16f, a * .32f * breathe);
-        drawScaled(1.0f, a * .82f);
+        drawScaled(1.0f, a * snap.icons.emblemCrispAlpha);
     }
+    RenderSampling::PopSampler(dl);
 }
 
 }  // namespace Renderer
