@@ -1,11 +1,15 @@
 #include "Hooks.hpp"
 
 #include "BadgeTextures.hpp"
+#include "Deck.hpp"
 #include "DepthClip.hpp"
 #include "GameState.hpp"
+#include "Graffito.hpp"
 #include "ParticleTextures.hpp"
 #include "ProjectManifest.hpp"
+#include "RasterQuality.hpp"
 #include "Renderer.hpp"
+#include "RenderSampling.hpp"
 #include "SceneMeter.hpp"
 #include "Settings.hpp"
 #include "TextPostProcess.hpp"
@@ -26,12 +30,19 @@
 namespace Hooks
 {
 
-// State is partitioned into three flag structs reached via static accessors:
-//   Init()  -- initialization lifecycle; reset individual flags to force
-//              rebuilds (mipmapsGenerated, particleTexturesLoaded,
-//              backendReinitRequested).
-//   Frame() -- per-frame flags, reset at the start of each PostDisplay thunk.
-//   Diag()  -- exception counters and one-shot log gates.
+// State lives in four function-local statics:
+//   Init()  - initialization lifecycle. Clearing one of the "loaded" flags
+//             (mipmapsGenerated, particleTexturesLoaded, badgeTexturesLoaded,
+//             postProcessInitialized) forces that resource to rebuild on the
+//             next frame. backendReinitRequested is the opposite polarity:
+//             setting it requests the rebuild, and the next frame clears it.
+//   Frame() - per-frame flags, reset at the start of each PostDisplay thunk.
+//   Diag()  - exception counters and one-shot log gates.
+//   D3D()   - cached device, context, swapchain, the glyph-owned font atlas
+//             SRV, and the original Present pointer. StateMutex() guards the
+//             device, context and swapchain pointers. originalPresent is an
+//             atomic, which the Present fast path reads without the lock;
+//             fontAtlasSRV is written only by the render thread.
 
 struct InitFlags
 {
@@ -43,12 +54,19 @@ struct InitFlags
     std::atomic<bool> badgeTexturesLoaded{false};
     std::atomic<uint32_t> badgeTexturesGen{0};
     std::atomic<bool> postProcessInitialized{false};
+    std::atomic<std::uint64_t> nextGraffitoRetryAtMs{0};
     std::atomic<bool> backendReinitRequested{false};
 };
 
 struct FrameFlags
 {
+    // Records the gate decision of the current frame. Nothing in src/ reads it
+    // back; the draw sites re-evaluate the gate through their own local copy.
     std::atomic<bool> shouldRenderOverlay{false};
+    // Set by RenderOverlayNow. PresentHook reads it to tell "PostDisplay
+    // already drew this frame" from "PostDisplay was skipped". PostDisplay
+    // reads it again after the original HUD draw and skips its own draw when
+    // the overlay already went out this frame.
     std::atomic<bool> overlayRenderedThisFrame{false};
 };
 
@@ -83,21 +101,21 @@ static std::mutex& StateMutex()
     return instance;
 }
 
-// Original Present function pointer
+// Signature of IDXGISwapChain::Present.
 using PresentFn = HRESULT(WINAPI*)(IDXGISwapChain*, UINT, UINT);
 
-// D3D11 device, context, swap chain, and original Present pointer.
-// Wrapped in a function-local static to avoid non-trivially destructible
-// namespace-scope globals (static destruction order risk on DLL unload).
+// D3D11 device, context, swap chain, and original Present pointer. Reached
+// through a function-local static so no non-trivially destructible object sits
+// at namespace scope, where destruction order on DLL unload is unsafe.
 struct D3DState
 {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     Microsoft::WRL::ComPtr<IDXGISwapChain> swapChain;
     std::atomic<PresentFn> originalPresent{nullptr};
-    // glyph-owned mipmapped font atlas SRV bound into io.Fonts->TexID. Held here
-    // so it is not confused with the ImGui backend's own font texture (which the
-    // backend creates and frees in InvalidateDeviceObjects).
+    // glyph-owned mipmapped font atlas SRV bound into io.Fonts->TexID. Kept
+    // separate from the ImGui backend's own font texture, which the backend
+    // creates and frees in InvalidateDeviceObjects.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> fontAtlasSRV;
 };
 
@@ -107,13 +125,12 @@ static D3DState& D3D()
     return s;
 }
 
-// Forward declaration of Present hook
 HRESULT WINAPI PresentHook(IDXGISwapChain* swapChain, UINT syncInterval, UINT flags);
 
-// Forward declaration of overlay render function (called by PresentHook and PostDisplay::thunk)
+// Draws one overlay frame. Called by PresentHook and by PostDisplay::thunk.
 void RenderOverlayNow();
 
-// Installs the Present hook on a specific swapchain and stores original Present.
+// Installs the Present hook on one swapchain and stores the original Present.
 bool TryInstallPresentHook(IDXGISwapChain* swapChain);
 
 bool TryInstallPresentHook(IDXGISwapChain* swapChain)
@@ -132,8 +149,8 @@ bool TryInstallPresentHook(IDXGISwapChain* swapChain)
     const auto currentPresent = reinterpret_cast<PresentFn>(vtable[8]);
     const auto ourPresent = reinterpret_cast<PresentFn>(&PresentHook);
 
-    // Hold the lock across both the original-pointer store and the vtable
-    // write so that concurrent Present calls never observe one without the other.
+    // Hold the lock across both the original-pointer store and the vtable write,
+    // so a concurrent Present call never sees one without the other.
     const std::lock_guard<std::mutex> lock(StateMutex());
     if (currentPresent == ourPresent)
     {
@@ -152,7 +169,13 @@ bool TryInstallPresentHook(IDXGISwapChain* swapChain)
     return true;
 }
 
-// Detect runtime swap-chain/device changes and refresh cached pointers.
+// Detects a device/context/swapchain change, refreshes the cached pointers,
+// re-installs the Present hook on the new swapchain, and schedules every
+// GPU-owning subsystem for rebuild. Rebuilding itself happens lazily on the
+// next RenderOverlayNow.
+//
+// Only the CreateD3DAndSwapChain thunk calls this, so a device or swapchain
+// swap that does not re-enter that call is not detected.
 static void HandleDeviceChange()
 {
     auto renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -182,13 +205,17 @@ static void HandleDeviceChange()
     {
         ParticleTextures::Shutdown();
         BadgeTextures::Shutdown();
+        Deck::Shutdown();
         TextPostProcess::Shutdown();
         SceneMeter::Shutdown();
         DepthClip::Shutdown();
+        Graffito::Shutdown();
+        RenderSampling::Shutdown();
         Init().mipmapsGenerated.store(false, std::memory_order_release);
         Init().particleTexturesLoaded.store(false, std::memory_order_release);
         Init().badgeTexturesLoaded.store(false, std::memory_order_release);
         Init().postProcessInitialized.store(false, std::memory_order_release);
+        Init().nextGraffitoRetryAtMs.store(0, std::memory_order_release);
         Init().backendReinitRequested.store(true, std::memory_order_release);
         if (!TryInstallPresentHook(swapChain))
         {
@@ -203,9 +230,83 @@ static void HandleDeviceChange()
     }
 }
 
-// First-time ImGui init: create context, load fonts, init Win32/DX11 backends,
-// install the Present hook. Returns false during load-order transitions where
-// the swapchain isn't ready yet; callers may retry later.
+// Populate all four fixed font slots at one raster density. The configured font
+// size remains unchanged because RasterizerDensity changes source sampling only.
+// The caller holds Settings::Mutex() for shared access.
+static bool BuildFontAtlas(float density)
+{
+    auto& atlas = *ImGui::GetIO().Fonts;
+    atlas.Clear();
+    atlas.TexGlyphPadding = RasterQuality::FONT_GLYPH_PADDING;
+
+    // Glyph range: Basic Latin plus Latin-1 Supplement (0x0020-0x00FF), that is
+    // Western European only. Cyrillic (0x0400+) and CJK (0x4E00+) fall back to
+    // ImGui's default glyph.
+    // TODO: configurable glyph ranges for broader locale support.
+    static const ImWchar ranges[] = {
+        0x0020,
+        0x00FF,
+        0,
+    };
+
+    // FreeType with light hinting keeps scaled text smooth.
+    ImFontConfig config;
+    config.FontBuilderFlags = ImGuiFreeTypeBuilderFlags_LightHinting;
+    config.OversampleH = 2;  // FreeType plus mipmaps make 4x unnecessary
+    config.OversampleV = 2;
+    config.PixelSnapH = false;  // Off, so glyphs keep subpixel positions
+    config.RasterizerDensity = density;
+    config.RasterizerMultiply = 1.15f;  // Give title, name, and level strokes more weight
+
+    // Font paths come from the obfuscated asset manifest, falling back to the
+    // INI path when the manifest has no entry. Both are already GUID-named.
+    const auto fontPath = [](const std::string& mapped,
+                             const std::string& ini) -> const std::string&
+    { return mapped.empty() ? ini : mapped; };
+
+    const auto addFontSlot = [&](const std::string& path, float size) -> bool
+    {
+        if (!path.empty() &&
+            atlas.AddFontFromFileTTF(path.c_str(), size, &config, ranges) != nullptr)
+        {
+            return true;
+        }
+        return atlas.AddFontDefault(&config) != nullptr;
+    };
+
+    // The load order fixes the font indices that the renderer uses. Each slot
+    // adds one fallback font when its configured asset is unavailable.
+    const auto& font = Settings::Font();
+    bool slotsReady =
+        addFontSlot(fontPath(ProjectManifest::FontName(), font.NameFontPath), font.NameFontSize);
+    slotsReady = addFontSlot(fontPath(ProjectManifest::FontLevel(), font.LevelFontPath),
+                             font.LevelFontSize) &&
+                 slotsReady;
+    slotsReady = addFontSlot(fontPath(ProjectManifest::FontTitle(), font.TitleFontPath),
+                             font.TitleFontSize) &&
+                 slotsReady;
+
+    config.RasterizerMultiply = 1.0f;  // Preserve the ornament font's authored weight.
+    const auto& ornament = Settings::Ornament();
+    slotsReady = addFontSlot(fontPath(ProjectManifest::FontOrnament(), ornament.FontPath),
+                             ornament.FontSize) &&
+                 slotsReady;
+
+    return slotsReady && atlas.Build();
+}
+
+static bool FontAtlasFitsD3D11()
+{
+    const auto& atlas = *ImGui::GetIO().Fonts;
+    return atlas.TexWidth > 0 && atlas.TexHeight > 0 &&
+           atlas.TexWidth <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+           atlas.TexHeight <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+}
+
+// First-time ImGui init: create the context, load fonts, init the Win32 and
+// DX11 backends, install the Present hook. Returns false while the swapchain is
+// not ready yet; the caller may retry later. A failure part-way through undoes
+// everything it created, so a retry starts clean.
 static bool InitializeImGui()
 {
     auto renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -240,7 +341,7 @@ static bool InitializeImGui()
         return false;
     }
 
-    // Store for later mipmap generation
+    // Cache for the later mipmap generation pass.
     {
         const std::lock_guard<std::mutex> lock(StateMutex());
         D3D().device = device;
@@ -278,93 +379,48 @@ static bool InitializeImGui()
         TextPostProcess::Shutdown();
         SceneMeter::Shutdown();
         DepthClip::Shutdown();
+        Graffito::Shutdown();
+        RenderSampling::Shutdown();
     };
 
     ImGui::CreateContext();
     contextCreated = true;
 
-    // Configure ImGui I/O settings
     auto& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.MouseDrawCursor = false;
     io.IniFilename = nullptr;
 
-    // Glyph range: Basic Latin + Latin-1 Supplement (0x0020-0x00FF). Western
-    // European only -- Cyrillic (0x0400+) and CJK (0x4E00+) fall back to
-    // ImGui's default glyph.
-    // TODO: configurable glyph ranges for broader locale support.
-    static const ImWchar ranges[] = {
-        0x0020,
-        0x00FF,
-        0,
-    };
     const std::shared_lock<std::shared_mutex> settingsReadLock(Settings::Mutex());
-
-    // Font config: FreeType with light hinting for smooth scaled text
-    ImFontConfig config;
-    config.FontBuilderFlags = ImGuiFreeTypeBuilderFlags_LightHinting;
-    config.OversampleH = 2;  // FreeType + mipmaps make 4x unnecessary
-    config.OversampleV = 2;
-    config.PixelSnapH = false;  // Disable pixel snapping for smooth subpixel rendering
-
-    // Font paths come from the obfuscated asset manifest when present, falling
-    // back to the INI path (both already GUID-named) when it is not.
-    const auto fontPath = [](const std::string& mapped,
-                             const std::string& ini) -> const std::string&
-    { return mapped.empty() ? ini : mapped; };
-
-    // Font Index 0: Name font
-    const auto& font = Settings::Font();
-    ImFont* nameFont = io.Fonts->AddFontFromFileTTF(
-        fontPath(ProjectManifest::FontName(), font.NameFontPath).c_str(),
-        font.NameFontSize,
-        &config,
-        ranges);
-    if (!nameFont)
+    float atlasDensity = RasterQuality::FONT_DENSITY;
+    bool atlasReady = BuildFontAtlas(RasterQuality::FONT_DENSITY);
+    if (!atlasReady || !FontAtlasFitsD3D11())
     {
-        // Fallback to default font if custom font fails to load
-        io.Fonts->AddFontDefault();
-    }
-
-    // Font Index 1: Level font
-    ImFont* levelFont = io.Fonts->AddFontFromFileTTF(
-        fontPath(ProjectManifest::FontLevel(), font.LevelFontPath).c_str(),
-        font.LevelFontSize,
-        &config,
-        ranges);
-    if (!levelFont)
-    {
-        io.Fonts->AddFontDefault();
-    }
-
-    // Font Index 2: Title font
-    ImFont* titleFont = io.Fonts->AddFontFromFileTTF(
-        fontPath(ProjectManifest::FontTitle(), font.TitleFontPath).c_str(),
-        font.TitleFontSize,
-        &config,
-        ranges);
-    if (!titleFont)
-    {
-        io.Fonts->AddFontDefault();
-    }
-
-    // Font Index 3: Ornament font
-    const auto& orn = Settings::Ornament();
-    const std::string& ornPath = fontPath(ProjectManifest::FontOrnament(), orn.FontPath);
-    if (!ornPath.empty())
-    {
-        ImFont* ornamentFont =
-            io.Fonts->AddFontFromFileTTF(ornPath.c_str(), orn.FontSize, &config, ranges);
-        if (!ornamentFont)
+        logger::warn(
+            "Hooks: {:.1f}x font atlas build produced {}x{} pixels or failed; rebuilding "
+            "at {:.1f}x",
+            RasterQuality::FONT_DENSITY,
+            io.Fonts->TexWidth,
+            io.Fonts->TexHeight,
+            RasterQuality::FONT_FALLBACK_DENSITY);
+        atlasReady = BuildFontAtlas(RasterQuality::FONT_FALLBACK_DENSITY);
+        if (!atlasReady || !FontAtlasFitsD3D11())
         {
-            io.Fonts->AddFontDefault();
+            logger::error(
+                "Hooks: fallback font atlas build failed or exceeded D3D11 limits "
+                "({}x{})",
+                io.Fonts->TexWidth,
+                io.Fonts->TexHeight);
+            cleanupFailedInit();
+            return false;
         }
+        atlasDensity = RasterQuality::FONT_FALLBACK_DENSITY;
     }
-    else
-    {
-        // Add placeholder so font indices stay consistent
-        io.Fonts->AddFontDefault();
-    }
+    logger::info("Hooks: built font atlas at {:.1f}x ({}x{}, {} px glyph padding)",
+                 atlasDensity,
+                 io.Fonts->TexWidth,
+                 io.Fonts->TexHeight,
+                 io.Fonts->TexGlyphPadding);
 
     if (!ImGui_ImplWin32_Init(desc.OutputWindow))
     {
@@ -381,7 +437,7 @@ static bool InitializeImGui()
     }
     dx11Initialized = true;
 
-    // Store swap chain and hook Present for post-upscaler rendering
+    // Cache the swap chain, then hook Present for the post-upscaler path.
     {
         const std::lock_guard<std::mutex> lock(StateMutex());
         D3D().swapChain = swapChain;
@@ -403,17 +459,22 @@ static bool InitializeImGui()
     return true;
 }
 
-// @author Codex (https://github.com/codex)
-// Late-bootstrap path: D3D creation hook may have fired before glyph loaded,
-// or renderer startup order may have shifted. Three guards coordinate safe
-// concurrent calls from PostDisplay + PresentHook on the render thread:
-//   1. initialized       - acquire-load early-out; no-op forever once true.
-//   2. nextInitRetryAtMs - back off INIT_RETRY_INTERVAL_MS (5s) after a
-//                          failed attempt; spinning every frame floods logs.
+// Late-bootstrap path: the D3D creation hook can fire before glyph is loaded,
+// so ImGui init must also be reachable from the per-frame hooks. The two
+// callers are CreateD3DAndSwapChain::thunk and PostDisplay::thunk. PresentHook
+// never calls this, so it cannot bootstrap the overlay on its own.
+// Three guards make concurrent calls from those two thunks safe:
+//   1. initialized       - acquire-load early-out. It stays true for the rest
+//                          of the session unless RenderOverlayNow clears it
+//                          after a failed DX11 backend reinit, which lets this
+//                          function run again.
+//   2. nextInitRetryAtMs - after a failed attempt, wait
+//                          INIT_RETRY_INTERVAL_MS (5 s); retrying every frame
+//                          floods the log.
 //   3. initializing      - CAS re-entry guard. InitializeImGui touches the
-//                          ImGui/D3D singletons; concurrent entry would race.
-// CAS + RAII is deliberate: a mutex would serialize render-thread frames
-// against any in-flight init. The CAS lets non-winners give up immediately.
+//                          ImGui and D3D singletons, so concurrent entry races.
+// CAS plus RAII, not a mutex: a mutex would hold render-thread frames behind an
+// in-flight init, while the CAS lets a non-winner return immediately.
 static void EnsureOverlayInitialized()
 {
     static constexpr std::uint64_t INIT_RETRY_INTERVAL_MS = 5000;
@@ -449,7 +510,8 @@ static void EnsureOverlayInitialized()
     }
 }
 
-// Hook for D3D11 device/swap chain creation
+// Thunk-call hook on D3D11 device and swap chain creation. Runs the original
+// call first, then either initializes ImGui or handles a device change.
 struct CreateD3DAndSwapChain
 {
     static void thunk()
@@ -467,7 +529,8 @@ struct CreateD3DAndSwapChain
     static inline REL::Relocation<decltype(thunk)> func;
 };
 
-// Generate mipmapped font atlas for improved text rendering at various scales.
+// Builds a mipmapped copy of the ImGui font atlas and binds it as io.Fonts->TexID
+// so text stays clean as plates scale down with distance. Runs once per device.
 static void GenerateMipmappedFontAtlas(ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (Init().mipmapsGenerated.load(std::memory_order_acquire) || !device || !context)
@@ -517,13 +580,13 @@ static void GenerateMipmappedFontAtlas(ID3D11Device* device, ID3D11DeviceContext
                     fontTexture.Get(), &srvDesc, fontSRV.GetAddressOf())))
             {
                 context->GenerateMips(fontSRV.Get());
-                // The SRV currently in io.Fonts->TexID is owned by the ImGui DX11
+                // The SRV already in io.Fonts->TexID belongs to the ImGui DX11
                 // backend (bd->pFontTextureView). Releasing it here would dangle
-                // that pointer and make the backend double-free it in
-                // InvalidateDeviceObjects on the next device rebuild. Retain our
+                // that pointer, and the backend would double-free it in
+                // InvalidateDeviceObjects on the next device rebuild. Keep the
                 // mipmapped SRV in a glyph-owned ComPtr instead: reassigning it
-                // releases any prior glyph atlas, while the backend keeps owning
-                // and freeing its own non-mipmapped texture.
+                // releases the previous glyph atlas, and the backend keeps
+                // owning and freeing its own non-mipmapped texture.
                 D3D().fontAtlasSRV = fontSRV;
                 io.Fonts->SetTexID(reinterpret_cast<ImTextureID>(fontSRV.Get()));
                 mipmapsReady = true;
@@ -536,7 +599,10 @@ static void GenerateMipmappedFontAtlas(ID3D11Device* device, ID3D11DeviceContext
     }
 }
 
-// Load particle textures if enabled and not yet loaded.
+// Load particle textures if enabled and not yet loaded. Turning the setting off
+// does not unload them; a device change (HandleDeviceChange) or a failed ImGui
+// init (cleanupFailedInit) releases them. A failed Initialize leaves the flag
+// clear, so the next frame retries.
 static void EnsureParticleTexturesLoaded(ID3D11Device* device, bool useParticleTextures)
 {
     if (useParticleTextures && !Init().particleTexturesLoaded.load(std::memory_order_acquire) &&
@@ -549,9 +615,9 @@ static void EnsureParticleTexturesLoaded(ID3D11Device* device, bool useParticleT
     }
 }
 
-// Rasterize status badge SVGs if not yet loaded.  Settings hot reload bumps
-// the generation counter, which drops the cache so renamed icons or a new
-// folder take effect without a restart.
+// Rasterizes the status badge SVGs. A settings hot reload bumps the generation
+// counter, which drops the cache, so a renamed icon or a new folder takes effect
+// without a restart.
 static void EnsureBadgeTexturesLoaded(ID3D11Device* device)
 {
     if (!device)
@@ -585,7 +651,7 @@ static void EnsureBadgeTexturesLoaded(ID3D11Device* device)
                  ic.UndeadIcon,
                  ic.DaedraIcon,
                  ic.DragonIcon,
-                 // Expanded always-on slots (more NPC + player indicators).
+                 // Always-on slots: further NPC and player indicators.
                  ic.NeutralIcon,
                  ic.HumanoidIcon,
                  ic.EvenIcon,
@@ -618,8 +684,8 @@ static void EnsureBadgeTexturesLoaded(ID3D11Device* device)
     {
         BadgeTextures::Shutdown();
     }
-    // Full-color tier emblem PNGs come from the obfuscated manifest (rank
-    // order); an empty list clears them (icons disabled or feature off).
+    // Full-color tier emblem PNGs come from the obfuscated manifest, in rank
+    // order. An empty list clears them (icons disabled, or the feature is off).
     static const std::vector<std::string> kNoBadges{};
     BadgeTextures::InitializeTierImages(
         device, (enabled && tierImages) ? ProjectManifest::TierBadges() : kNoBadges);
@@ -627,7 +693,10 @@ static void EnsureBadgeTexturesLoaded(ID3D11Device* device)
     Init().badgeTexturesLoaded.store(true, std::memory_order_release);
 }
 
-// Render overlay immediately
+// Builds and submits one overlay frame: first-use resource setup, ImGui frame,
+// Deck compose, draw-data submit. Returns without drawing when ImGui is not
+// initialized yet or the context is gone. All exceptions are caught and logged
+// at a decaying rate: the first 5, then every 120th.
 void RenderOverlayNow()
 {
     if (!Init().initialized.load(std::memory_order_acquire))
@@ -643,10 +712,12 @@ void RenderOverlayNow()
     {
         Microsoft::WRL::ComPtr<ID3D11Device> device;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+        Microsoft::WRL::ComPtr<IDXGISwapChain> swapChain;
         {
             const std::lock_guard<std::mutex> lock(StateMutex());
             device = D3D().device;
             context = D3D().context;
+            swapChain = D3D().swapChain;
         }
 
         if (Init().backendReinitRequested.exchange(false, std::memory_order_acq_rel))
@@ -667,14 +738,18 @@ void RenderOverlayNow()
             Init().mipmapsGenerated.store(false, std::memory_order_release);
             Init().particleTexturesLoaded.store(false, std::memory_order_release);
             Init().postProcessInitialized.store(false, std::memory_order_release);
+            Init().nextGraffitoRetryAtMs.store(0, std::memory_order_release);
             logger::info("Hooks: Reinitialized ImGui DX11 backend after device change");
         }
 
-        // Start new ImGui frame
+        // A device change releases the old sampler states. Initialize attempts
+        // creation once for each device and leaves ImGui sampling unchanged on failure.
+        RenderSampling::Initialize(device.Get(), context.Get());
+
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
 
-        // Generate mipmapped font atlas on first frame
+        // First frame after a device change rebuilds the mipmapped font atlas.
         GenerateMipmappedFontAtlas(device.Get(), context.Get());
 
         bool useParticleTextures = false;
@@ -689,7 +764,10 @@ void RenderOverlayNow()
         // Rasterize status badge SVGs (re-runs after settings hot reload)
         EnsureBadgeTexturesLoaded(device.Get());
 
-        // Initialize GPU post-processing on first frame
+        // Initialize GPU post-processing on first frame. SceneMeter and
+        // DepthClip share the TextPostProcess gate, so while
+        // TextPostProcess::Initialize keeps failing all three are retried every
+        // frame. Each one degrades to a no-op when its own init fails.
         if (!Init().postProcessInitialized.load(std::memory_order_acquire) && device && context)
         {
             if (TextPostProcess::Initialize(device.Get(), context.Get()))
@@ -698,6 +776,31 @@ void RenderOverlayNow()
             }
             SceneMeter::Initialize(device.Get(), context.Get());
             DepthClip::Initialize(device.Get(), context.Get());
+        }
+
+        // Graffito owns a separate shader pipeline, so a transient failure must
+        // not become permanent just because the other post-process helpers
+        // succeeded. Retry on a slow cadence to keep the log quiet.
+        if (!Graffito::IsInitialized() && device && context)
+        {
+            static constexpr std::uint64_t GRAFFITO_RETRY_INTERVAL_MS = 5000;
+            const auto nowMs =
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now().time_since_epoch())
+                                               .count());
+            const auto nextRetryAt = Init().nextGraffitoRetryAtMs.load(std::memory_order_acquire);
+            if (nextRetryAt == 0 || nowMs >= nextRetryAt)
+            {
+                if (Graffito::Initialize(device.Get(), context.Get()))
+                {
+                    Init().nextGraffitoRetryAtMs.store(0, std::memory_order_release);
+                }
+                else
+                {
+                    Init().nextGraffitoRetryAtMs.store(nowMs + GRAFFITO_RETRY_INTERVAL_MS,
+                                                       std::memory_order_release);
+                }
+            }
         }
 
         // Set display size to actual screen resolution
@@ -712,21 +815,30 @@ void RenderOverlayNow()
 
         ImGui::NewFrame();
 
-        // Disable nav system
+        // Clear the nav windowing target so the overlay never takes keyboard nav.
         if (auto g = ImGui::GetCurrentContext())
         {
             g->NavWindowingTarget = nullptr;
         }
 
-        // Draw overlay
-        Renderer::Draw();
+        // Deck is independent of the ambient nameplate toggle. Its status
+        // toast still renders while a card is developing, but disabled
+        // nameplates must not reappear merely because Deck requested a frame.
+        if (Renderer::IsOverlayAllowedRT())
+        {
+            Renderer::Draw();
+        }
+        Deck::DrawNotification();
 
-        // Finalize and render
         ImGui::EndFrame();
         ImGui::Render();
+        // Compose/read back the card before the normal draw data lands on the
+        // game target. The scene texture was copied earlier this frame, pre-HUD
+        // in PostDisplay or in PresentHook on the fallback path. If neither
+        // copy ran, Deck::Process captures here instead, after the HUD.
+        Deck::Process(device.Get(), context.Get(), swapChain.Get());
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        // Mark that overlay was rendered this frame
         Frame().overlayRenderedThisFrame.store(true, std::memory_order_release);
     }
     catch (const std::exception& e)
@@ -749,30 +861,48 @@ void RenderOverlayNow()
     }
 }
 
-// Present hook: safety net for overlay rendering. Some upscalers (DLSS, FSR)
-// restructure the pipeline so PostDisplay is skipped/deferred; we render
-// here as a last resort, just before the original Present flips the backbuffer.
+// Safety net for overlay rendering. Some upscalers (DLSS, FSR) restructure the
+// pipeline so PostDisplay is skipped or deferred; the overlay is drawn here
+// instead, just before the original Present flips the backbuffer.
 //
-// Recovery limitation: if D3D().originalPresent is null (shouldn't happen in
-// normal operation), the fallback reads vtable[8] from the swapchain. Since
-// we already replaced vtable[8] with PresentHook, that candidate is rejected.
-// Recovery only succeeds if a *third-party* hook has since overwritten
-// vtable[8] with its own function, which we then adopt as "original" --
-// correct for linear hook chains but would produce wrong call ordering if
-// that third-party hook saved our PresentHook as *its* original. Unreachable
-// in practice because TryInstallPresentHook always sets originalPresent
-// before any Present call can occur.
+// Recovery limitation: when D3D().originalPresent is null, the fallback reads
+// vtable[8] from the swapchain. That slot already holds PresentHook, so the
+// candidate is rejected. Recovery therefore succeeds only when a third-party
+// hook has overwritten vtable[8] with its own function, which is then adopted
+// as "original" - correct for a linear hook chain, but the wrong call order if
+// that third-party hook saved PresentHook as *its* original.
+// TryInstallPresentHook always sets originalPresent before any Present call can
+// occur, so this path is unreachable in practice.
 HRESULT WINAPI PresentHook(IDXGISwapChain* swapChain, UINT syncInterval, UINT flags)
 {
-    // Bootstrap the overlay from the Present fallback (upscalers that skip
-    // PostDisplay). Tick unconditionally so the game thread can publish the
-    // gate; don't call CanDrawOverlay() here (render-thread cell-deref race).
-    if (!Frame().shouldRenderOverlay.load(std::memory_order_acquire))
+    // Present is the frame boundary for the fallback path. Consume the marker
+    // left by PostDisplay; when none was published, service a complete fallback
+    // frame. Clearing the marker again after this render keeps a Present-only
+    // pipeline from turning into a one-shot path.
+    const bool renderedByPostDisplay =
+        Frame().overlayRenderedThisFrame.exchange(false, std::memory_order_acq_rel);
+    if (!renderedByPostDisplay)
     {
+        // Tick unconditionally so the game thread can publish the gate. Do not
+        // call CanDrawOverlay() here: it dereferences cell state off the game
+        // thread.
         Renderer::TickRT();
+        Renderer::PrepareDeckCaptureRT();
 
-        const bool shouldRender =
-            Init().initialized.load(std::memory_order_acquire) && Renderer::IsOverlayAllowedRT();
+        if (Deck::NeedsSceneCapture())
+        {
+            Microsoft::WRL::ComPtr<ID3D11Device> device;
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+            {
+                const std::lock_guard<std::mutex> lock(StateMutex());
+                device = D3D().device;
+                context = D3D().context;
+            }
+            Deck::CaptureScene(device.Get(), context.Get(), swapChain);
+        }
+
+        const bool shouldRender = Init().initialized.load(std::memory_order_acquire) &&
+                                  (Renderer::IsOverlayAllowedRT() || Deck::NeedsFrame());
         Frame().shouldRenderOverlay.store(shouldRender, std::memory_order_release);
 
         if (shouldRender &&
@@ -780,15 +910,15 @@ HRESULT WINAPI PresentHook(IDXGISwapChain* swapChain, UINT syncInterval, UINT fl
         {
             logger::info("Hooks: Present fallback bootstrapped overlay rendering");
         }
+        if (shouldRender)
+        {
+            RenderOverlayNow();
+            Frame().overlayRenderedThisFrame.store(false, std::memory_order_release);
+        }
     }
+    Frame().shouldRenderOverlay.store(false, std::memory_order_release);
 
-    if (Frame().shouldRenderOverlay.load(std::memory_order_acquire) &&
-        !Frame().overlayRenderedThisFrame.load(std::memory_order_acquire))
-    {
-        RenderOverlayNow();
-    }
-
-    // Fast path: atomic load avoids the mutex for the common case.
+    // Fast path: the atomic load avoids the mutex in the common case.
     PresentFn originalPresent = D3D().originalPresent.load(std::memory_order_acquire);
 
     if (!originalPresent)
@@ -837,16 +967,16 @@ HRESULT WINAPI PresentHook(IDXGISwapChain* swapChain, UINT syncInterval, UINT fl
     return originalPresent(swapChain, syncInterval, flags);
 }
 
-// VTable hook for HUDMenu::PostDisplay (vtable index 6).
-// Render-thread, every frame. Calls the original PostDisplay first so the
-// game HUD renders before our overlay (puts overlay on top + into
-// screenshots). Installed via Stl::WriteVfunc<RE::HUDMenu, PostDisplay>().
-// See: Renderer::TickRT / IsOverlayAllowedRT / Draw, PresentHook (fallback
-// path when upscalers skip PostDisplay).
+// VTable hook for HUDMenu::PostDisplay (vtable index 6), installed with
+// Stl::WriteVfunc<RE::HUDMenu, PostDisplay>(). Runs on the render thread every
+// frame and calls the original PostDisplay first, so the game HUD is drawn
+// before the overlay; the overlay then lands on top and in screenshots.
+// See Renderer::TickRT / IsOverlayAllowedRT / Draw, and PresentHook for the
+// fallback path when upscalers skip PostDisplay.
 struct PostDisplay
 {
-    // Hook thunk called in place of the original `HUDMenu::PostDisplay`.
-    // a_menu: Pointer to the HUD menu instance.
+    // Thunk installed in place of HUDMenu::PostDisplay. a_menu is the HUD menu
+    // instance and may be null.
     static void thunk(RE::IMenu* a_menu)
     {
         Frame().shouldRenderOverlay.store(false, std::memory_order_release);
@@ -866,26 +996,46 @@ struct PostDisplay
         // idempotent per frame and self-clears the snapshot when not allowed.
         Renderer::TickRT();
 
-        // Early exit if the overlay backend isn't initialized yet.
+        // Backend not up yet: run the original HUD draw and skip the overlay.
         if (!Init().initialized.load(std::memory_order_acquire))
         {
             func(a_menu);
             return;
         }
 
-        // Verify menu is valid and visible
-        if (!a_menu || !a_menu->uiMovie || !a_menu->uiMovie->GetVisible())
+        // The game hides the HUD movie while it takes a screenshot. Glyph is an
+        // independent overlay and must still render into that capture, so only
+        // require a valid HUD menu and movie here, never their visibility.
+        if (!a_menu || !a_menu->uiMovie)
         {
             func(a_menu);
             return;
         }
 
+        // Resolve the key press from the plain actor snapshot, then copy the
+        // scene before HUDMenu draws the crosshair and meters. If this copy
+        // fails, Deck::Process falls back to the post-HUD target.
+        Renderer::PrepareDeckCaptureRT();
+        if (Deck::NeedsSceneCapture())
+        {
+            Microsoft::WRL::ComPtr<ID3D11Device> device;
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+            Microsoft::WRL::ComPtr<IDXGISwapChain> swapChain;
+            {
+                const std::lock_guard<std::mutex> lock(StateMutex());
+                device = D3D().device;
+                context = D3D().context;
+                swapChain = D3D().swapChain;
+            }
+            Deck::CaptureScene(device.Get(), context.Get(), swapChain.Get());
+        }
+
         // Gate rendering on the game-thread-published atomic, not a direct
         // game-state read.
-        bool shouldRender = Renderer::IsOverlayAllowedRT();
+        bool shouldRender = Renderer::IsOverlayAllowedRT() || Deck::NeedsFrame();
         Frame().shouldRenderOverlay.store(shouldRender, std::memory_order_release);
 
-        // Call the original PostDisplay function first
+        // Original HUD draw, before the overlay.
         func(a_menu);
 
         if (shouldRender && !Frame().overlayRenderedThisFrame.load(std::memory_order_acquire))
@@ -894,7 +1044,6 @@ struct PostDisplay
         }
     }
 
-    // Original function pointer
     static inline REL::Relocation<decltype(thunk)> func;
     // Virtual function table index for PostDisplay
     static inline std::size_t idx = 0x6;
@@ -902,15 +1051,12 @@ struct PostDisplay
 
 void Install()
 {
-    // Defense in depth: SKSEPlugin_Version's CompatibleVersions should already
-    // keep SKSE from loading glyph off Skyrim SE 1.5.97, but the
-    // CreateD3DAndSwapChain hook patches a compile-time SE call offset
-    // (GLYPH_OFFSET resolves to the SE value), so installing on AE/VR would
-    // corrupt an unrelated address. Bail loudly instead.
-    if (!REL::Module::IsSE())
+    // Defense in depth: plugin loading rejects anything except SE/AE. This
+    // protects the patch site if Install() is reached through another path.
+    // GLYPH_OFFSET selects the matching SE or AE/GOG call offset at runtime.
+    if (!REL::Module::IsSE() && !REL::Module::IsAE())
     {
-        SKSE::log::error(
-            "Hooks: Unsupported runtime (not Skyrim SE 1.5.97); skipping hook installation");
+        SKSE::log::error("Hooks: Unsupported Skyrim runtime; skipping hook installation");
         return;
     }
 
@@ -919,12 +1065,12 @@ void Install()
 
     try
     {
-        // Hook D3D11 device creation for ImGui initialization
+        // D3D11 device creation drives ImGui initialization.
         REL::Relocation<std::uintptr_t> target{RELOCATION_ID(75595, 77226),
                                                GLYPH_OFFSET(0x9, 0x275)};
-        // WriteThunkCall (write_call<5>) overwrites a 5-byte relative CALL.
-        // Verify the patch site actually starts with the CALL rel32 opcode
-        // (0xE8) so an offset drift fails loudly instead of clobbering code.
+        // WriteThunkCall (write_call<5>) overwrites a 5-byte relative CALL, so
+        // verify the patch site starts with the CALL rel32 opcode (0xE8). An
+        // offset drift then fails loudly instead of clobbering code.
         const auto patchOpcode = *reinterpret_cast<const std::uint8_t*>(target.address());
         if (patchOpcode != 0xE8)
         {
@@ -950,7 +1096,7 @@ void Install()
 
     try
     {
-        // Hook HUD post-display, renders overlay after game HUD is complete
+        // HUD post-display draws the overlay after the game HUD is complete.
         Stl::WriteVfunc<RE::HUDMenu, PostDisplay>();
         hudHookInstalled = true;
     }
