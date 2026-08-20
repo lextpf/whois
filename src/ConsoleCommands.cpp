@@ -19,7 +19,7 @@ namespace ConsoleCommands
 {
 namespace
 {
-// Print to the in-game console and also mirror to the SKSE log.
+// Print to the in-game console and mirror the same line to the SKSE log.
 void Echo(const std::string& msg)
 {
     if (auto* console = RE::ConsoleLog::GetSingleton())
@@ -29,9 +29,9 @@ void Echo(const std::string& msg)
     logger::info("glyph console: {}", msg);
 }
 
-// Split on ASCII whitespace, no quoting support -- Skyrim's console already
-// passes through a single typed line, and our subcommands and toggle arguments
-// never contain whitespace.
+// Split on ASCII whitespace. No quoting support is needed: the console passes
+// through one typed line, and no sub-command or toggle argument contains
+// whitespace.
 std::vector<std::string> Tokenize(std::string_view text)
 {
     std::vector<std::string> tokens;
@@ -65,11 +65,11 @@ std::string ToLowerAscii(std::string s)
     return s;
 }
 
-// True when `typed` is a non-empty leading prefix of `full`.  Lets any
-// unambiguous abbreviation stand in for a sub-command ("n" -> "nameplates",
-// "d" -> "debug").  The sub-command initials are all distinct, so a single
-// letter is never ambiguous; a full word still matches itself since no
-// command word is a prefix of another.
+// True when typed is a non-empty leading prefix of full, so any unambiguous
+// abbreviation stands in for a sub-command ("n" -> "nameplates", "d" ->
+// "debug"). The sub-command initials are all distinct, so a single letter is
+// never ambiguous, and no command word is a prefix of another, so a full word
+// matches only itself.
 bool IsPrefixOf(std::string_view typed, std::string_view full)
 {
     return !typed.empty() && typed.size() <= full.size() && full.substr(0, typed.size()) == typed;
@@ -170,16 +170,16 @@ bool GlyphExecute(const RE::SCRIPT_PARAMETER*,
 {
     auto tokens = Tokenize(a_scriptObj ? a_scriptObj->GetCommand() : std::string{});
 
-    // Defensive: Script::GetCommand() includes the leading "glyph", but the
-    // shape of the returned string has historically varied across CommonLibSSE
-    // versions and game patches.  Skip the leading "glyph" token if present.
+    // Script::GetCommand() includes the leading "glyph", but the exact shape of
+    // the returned string is not guaranteed across CommonLibSSE versions and
+    // game patches, so drop that token only when it is present.
     size_t cmdIdx = 0;
     if (!tokens.empty() && ToLowerAscii(tokens.front()) == "glyph")
     {
         cmdIdx = 1;
     }
 
-    // Bare 'glyph' -- toggle nameplates (preserves the original single-purpose behavior).
+    // Bare 'glyph' toggles nameplates.
     if (cmdIdx >= tokens.size())
     {
         HandleNameplates(tokens, tokens.size());
