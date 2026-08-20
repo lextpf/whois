@@ -43,14 +43,15 @@ bool IsBehindCamera(const RE::NiPoint3& worldPos,
     toTarget.y /= distance;
     toTarget.z /= distance;
 
-    // Dot product: Negative means behind camera
+    // Below the threshold means behind the camera; the threshold sits past
+    // perpendicular, so it is not 0. See Occlusion.hpp.
     float dot =
         toTarget.x * cameraForward.x + toTarget.y * cameraForward.y + toTarget.z * cameraForward.z;
 
     return dot < Constants::BEHIND_CAMERA_DOT_THRESHOLD;
 }
 
-// Fail-safe: returns true (visible) on any error to avoid false occlusion.
+// Fail-open: returns true (visible) on any error, to avoid false occlusion.
 bool HasLineOfSightToActor(RE::Actor* actor)
 {
     auto* player = RE::PlayerCharacter::GetSingleton();
