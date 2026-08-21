@@ -44,8 +44,8 @@ cbuffer BlurCB : register(b0) {
 static const int HALF_KERNEL = 16;
 float Gauss(float x, float s) { return exp(-0.5 * (x * x) / (s * s)); }
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    // Clamp sigma so the kernel always covers >= 3 sigma (99.7% of the
-    // distribution).  Prevents boxy edges when GlowRadius is large.
+    // Clamp sigma so the 16-tap half-kernel always covers at least 3 sigma.
+    // Prevents boxy edges when GlowRadius is large.
     float sigma = clamp(Sigma, 0.001, HALF_KERNEL / 3.0);
     float4 sum  = InputTex.Sample(Sampler, uv) * Gauss(0, sigma);
     float  wSum = Gauss(0, sigma);
@@ -72,8 +72,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float4 bg   = Snapshot.Sample(Sampler, uv);
     if (text.a < 0.001) discard;
 
-    // Luminance of the text pixel - dark outlines/shadows are composited
-    // normally so they stay clean instead of producing bright inversions.
+    // Luminance of the text pixel - dark outlines and shadows composite
+    // normally so they do not invert to bright.
     float lum = dot(text.rgb, float3(0.299, 0.587, 0.114));
     float divideMask = smoothstep(0.10, 0.25, lum);
 
@@ -102,8 +102,8 @@ cbuffer CompositeCB : register(b0) {
 };
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float4 c = InputTex.Sample(Sampler, uv);
-    // Preserve the captured hue: intensity scales the colored fog, but does
-    // not add a white-ish haze term on top.
+    // Intensity scales the captured color only, with no added white term,
+    // so the captured hue is preserved.
     float3 bloom = saturate(c.rgb * (0.46 + Intensity * 0.34));
     float veilAlpha = saturate(pow(c.a, 0.72) * (0.14 + Intensity * 0.16));
     float coreExponent = lerp(1.18, 1.78, Intensity);
@@ -167,7 +167,7 @@ static ComPtr<ID3D11PixelShader> s_CompositePS;
 static ComPtr<ID3D11Buffer> s_BlurCB;
 static ComPtr<ID3D11Buffer> s_CompositeCB;
 static ComPtr<ID3D11SamplerState> s_LinearClampSampler;
-static ComPtr<ID3D11BlendState> s_AdditiveBlend;
+static ComPtr<ID3D11BlendState> s_AdditiveBlend;  // Created, but no pass binds it
 static ComPtr<ID3D11BlendState> s_ScreenBlend;
 static ComPtr<ID3D11RasterizerState> s_NoCullRS;
 
@@ -183,7 +183,7 @@ static uint32_t s_BlurHeight = 0;
 static uint32_t s_FullWidth = 0;
 static uint32_t s_FullHeight = 0;
 
-// Render target format (determined during init based on device support)
+// Render target format, chosen at init from device format support
 static DXGI_FORMAT s_RTFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
 // Divide capture resources (full-res)
@@ -473,9 +473,9 @@ bool Initialize(ID3D11Device* device, ID3D11DeviceContext* context)
         return false;
     }
 
-    // Screen blend state: output = src + dst * (1 - src)
-    // Capped at 1.0 - avoids the harsh white clipping of pure additive on
-    // bright backgrounds while still producing a natural light-emission look.
+    // Screen-style blend state: output = src.rgb * src.a + dst.rgb * (1 - src.rgb).
+    // The destination factor falls with the source color, so a bright
+    // background cannot clip to white the way pure additive does.
     D3D11_BLEND_DESC screenDesc{};
     screenDesc.RenderTarget[0].BlendEnable = TRUE;
     screenDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
@@ -533,6 +533,9 @@ void OnResize(uint32_t width, uint32_t height)
     if (width == s_FullWidth && height == s_FullHeight)
         return;
 
+    // The accepted size is recorded before creation, so the size test above also
+    // suppresses a retry: a target that fails here stays missing, and its bracket
+    // stays a no-op, until the resolution changes again.
     s_FullWidth = width;
     s_FullHeight = height;
     s_BlurWidth = (std::max)(width / 2u, 1u);
@@ -560,6 +563,9 @@ void OnResize(uint32_t width, uint32_t height)
     {
         // Snapshot must match the backbuffer format for CopyResource.
         // Query the actual backbuffer format from the main render target.
+        // This depends on the caller: the game's main RT must be bound now, or
+        // the snapshot keeps the fallback format below, and the copy in
+        // BeginDivideCapture is then rejected unless that format happens to match.
         DXGI_FORMAT bbFormat = DXGI_FORMAT_R8G8B8A8_UNORM;  // safe default
         {
             ComPtr<ID3D11RenderTargetView> curRTV;
@@ -645,11 +651,14 @@ void EndGlowAndComposite(const ImDrawList* /*dl*/, const ImDrawCmd* /*cmd*/)
     if (!s_Context || !s_RTV_A || !s_RTV_B || !s_SavedRTV)
         return;
 
-    // RT A now contains the glow text rendered at half-res.
-    // Apply separable Gaussian blur: A -> B (horizontal), B -> A (vertical).
+    // RT A holds the glow text at half resolution.  Apply a separable
+    // Gaussian blur: A -> B (horizontal), B -> A (vertical).
 
-    // Bias slightly wider so the background glow diffuses into a soft veil
-    // instead of resolving as a hard plate behind the text.
+    // Sigma is in half-res texels, and one texel spans two backbuffer pixels,
+    // so 0.48 gives about one full-res pixel of sigma per pixel of radius.  A
+    // Gaussian reaches about 3 sigma, so the glow spreads roughly three times
+    // the requested radius and stays diffuse instead of resolving as a hard
+    // plate behind the text.  The shader clamps sigma to 16/3 texels.
     const float sigma = (std::max)(1.0f, s_GlowRadius * .48f);
 
     // Unbind RT A as target, we'll read from it
@@ -735,7 +744,7 @@ void EndGlowAndComposite(const ImDrawList* /*dl*/, const ImDrawCmd* /*cmd*/)
         s_Context->PSSetShaderResources(0, 1, &nullSRV);
     }
 
-    // --- Composite: read blurred A -> main RT, additive blend ---
+    // --- Composite: read blurred A -> main RT, screen blend (src + dst * (1 - src)) ---
     {
         // Restore main render target
         ID3D11RenderTargetView* mainRTV = s_SavedRTV.Get();
@@ -776,7 +785,7 @@ void EndGlowAndComposite(const ImDrawList* /*dl*/, const ImDrawCmd* /*cmd*/)
 }
 
 // ============================================================================
-// Color Divide callbacks
+// Color divide callbacks
 // ============================================================================
 
 void SetDivideParams(float strength)
@@ -797,7 +806,11 @@ void BeginDivideCapture(const ImDrawList* /*dl*/, const ImDrawCmd* /*cmd*/)
     s_DivideSavedViewportCount = 1;
     s_Context->RSGetViewports(&s_DivideSavedViewportCount, &s_DivideSavedViewport);
 
-    // Snapshot the current backbuffer content (game world before nametags)
+    // Snapshot the current backbuffer content (game world before nametags).
+    // CopyResource needs matching dimensions and a compatible format, which
+    // holds only while the backbuffer is the bound target.  When the glow
+    // bracket already switched to the half-res glow RT, the copy is invalid and
+    // the snapshot keeps stale content.
     if (s_DivideSavedRTV)
     {
         ComPtr<ID3D11Resource> mainRes;
@@ -845,7 +858,10 @@ void EndDivideAndComposite(const ImDrawList* /*dl*/, const ImDrawCmd* /*cmd*/)
     ID3D11SamplerState* sampler = s_LinearClampSampler.Get();
     s_Context->PSSetSamplers(0, 1, &sampler);
 
-    // No blending - the shader outputs final pixels directly
+    // No blending - the shader outputs final pixels directly, taking the
+    // background from the snapshot instead of from the destination.  It
+    // discards captured pixels with alpha below 0.001, so pixels with no text
+    // keep the destination content.
     const float blendFactor[4] = {0, 0, 0, 0};
     s_Context->OMSetBlendState(nullptr, blendFactor, 0xFFFFFFFF);
 
