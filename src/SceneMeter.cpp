@@ -52,7 +52,7 @@ void FailOnce(const char* reason)
     if (!s_Failed)
     {
         s_Failed = true;
-        logger::warn("SceneMeter: disabled -- {}", reason);
+        logger::warn("SceneMeter: disabled - {}", reason);
     }
 }
 
@@ -90,8 +90,8 @@ float HalfToFloat(uint16_t h)
     return f;
 }
 
-/// Decode one texel of a supported backbuffer format to linear-ish [0,1] RGB.
-/// Returns false for unsupported formats (checked once at resource build).
+// Decode one texel of a supported backbuffer format to linear-ish [0,1] RGB.
+// Returns false for unsupported formats (checked once at resource build).
 bool DecodeTexel(DXGI_FORMAT fmt, const uint8_t* p, float rgb[3])
 {
     switch (fmt)
@@ -138,7 +138,7 @@ UINT BytesPerTexel(DXGI_FORMAT fmt)
     return fmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u : 4u;
 }
 
-/// (Re)build the mip pyramid + staging ring for the given backbuffer desc.
+// (Re)build the mip pyramid + staging ring for the given backbuffer desc.
 bool BuildResources(const D3D11_TEXTURE2D_DESC& src)
 {
     s_MipTex.Reset();
@@ -174,7 +174,9 @@ bool BuildResources(const D3D11_TEXTURE2D_DESC& src)
         return false;
     }
 
-    // Pick the mip whose width lands near 48 texels.
+    // Descend to the first mip at or below 64 texels wide: 60 at 1920 and
+    // 3840, 40 at 2560.  The h > 2 guard stops extreme aspect ratios from
+    // collapsing the grid height.
     UINT mip = 0;
     UINT w = src.Width;
     UINT h = src.Height;
@@ -337,7 +339,7 @@ void CollectResults()
         return;
     }
 
-    // Map the oldest pending slot -- written RING_SIZE-1 captures ago, so the
+    // Map the oldest pending slot - written RING_SIZE-1 captures ago, so the
     // GPU has almost certainly finished with it.  Never wait.
     const int slot = static_cast<int>((s_CaptureCounter + 1) % RING_SIZE);
     if (!s_StagingPending[slot])
