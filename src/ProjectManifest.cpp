@@ -35,9 +35,8 @@ Data& State()
 const std::vector<std::string> kEmptyVec{};
 const std::string kEmptyStr{};
 
-// Resolve a manifest-relative path to a full path.  Absolute paths (drive
-// letter or leading slash) pass through unchanged; everything else is taken
-// relative to the manifest's own directory.
+// Resolve a manifest entry to a full path. An absolute path (drive letter or leading slash)
+// passes through unchanged; everything else is taken relative to the manifest's directory.
 std::string Resolve(const std::string& baseDir, const std::string& rel)
 {
     if (rel.empty())
@@ -57,7 +56,7 @@ bool Load(const std::string& path)
     std::ifstream in(path, std::ios::binary);
     if (!in)
     {
-        SKSE::log::info("ProjectManifest: no manifest at '{}' -- using built-in asset defaults",
+        SKSE::log::info("ProjectManifest: no manifest at '{}' - using built-in asset defaults",
                         path);
         return false;
     }
@@ -145,7 +144,7 @@ bool Load(const std::string& path)
 
     d.loaded = true;
     SKSE::log::info(
-        "ProjectManifest: loaded '{}' -- {} tier emblem(s), {} particle style(s), fonts {}",
+        "ProjectManifest: loaded '{}' - {} tier emblem(s), {} particle style(s), fonts {}",
         path,
         d.tierBadges.size(),
         d.particles.size(),
