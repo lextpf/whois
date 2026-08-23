@@ -20,17 +20,18 @@
  * @author Alex (https://github.com/lextpf)
  * @ingroup TextEffects
  *
- * Companion to TextEffects.hpp. Public effect functions live in the main
- * header; this file declares the building blocks they share -- color math,
- * vertex-capture state, and internal outline variants.
+ * Public effect functions live in TextEffects.hpp. This file declares what they share:
+ * color math, vertex-capture state, and the internal outline variants.
+ *
+ * The thread affinity of the public API applies here as well: every helper runs on the
+ * render thread inside an ImGui frame, and none of them touch game state.
  *
  * ## :material-palette-outline: Vertex-Recolor Pattern
  *
- * Most animated effects work by rendering text in pure white, capturing
- * the resulting vertex range from the ImDrawList, and then rewriting
- * those vertices' colors per effect. TextVertexSetup::Begin() drives the
- * capture step and records the vertex range plus the bounding box; the
- * caller iterates `[vtxStart, vtxEnd)` and modifies colors directly.
+ * Most animated effects render the text in white, capture the vertex range that call added
+ * to the ImDrawList, then rewrite those vertices' colors. TextVertexSetup::Begin() performs
+ * the capture and records the vertex range plus the bounding box; the caller then walks
+ * `[vtxStart, vtxEnd)` and writes colors directly.
  *
  * ```cpp
  * TextVertexSetup vs;
@@ -44,11 +45,11 @@
  *
  * ## :material-vector-square: Outline Variants
  *
- * |               Helper | Directions | Use when                                 |
- * |----------------------|------------|------------------------------------------|
- * | DrawOutline4Internal |          4 | FastOutlines = true (lower draw cost)    |
- * | DrawOutline8Internal |          8 | Smoother edges, default                  |
- * |  DrawOutlineInternal |    4 or 8  | Caller passes `fastOutlines` as argument |
+ * |               Helper | Stamps         | Use when                                 |
+ * |----------------------|----------------|------------------------------------------|
+ * | DrawOutline4Internal | 4 cardinal     | FastOutlines = true (lower draw cost)    |
+ * | DrawOutline8Internal | 8-24 ring taps | Smoother edges, default                  |
+ * |  DrawOutlineInternal | per argument   | Caller passes `fastOutlines` as argument |
  *
  * @see TextEffects::DrawOutline (public wrapper)
  */
@@ -60,17 +61,37 @@ static constexpr float PI = std::numbers::pi_v<float>;  ///< pi
 static constexpr float TWO_PI = 2.0f * PI;              ///< 2*pi
 static constexpr float INV_TWO_PI =
     std::numbers::inv_pi_v<float> *
-    0.5f;  ///< 1/(2*pi), used to normalize angles from radians to [0,1]
+    0.5f;  ///< 1/(2*pi); scales an angle in radians to one turn from 0 to 1
 
-/// Return the fractional part of @p x.
-/// For negative input the result is still in [0,1) because floor() is used.
+/**
+ * @brief Compute the non-negative fractional part of a value.
+ *
+ * The function calculates `x
+ * - floor(x)`, so negative input also produces a value in
+ * [0, 1).
+ *
+ * @param x  Input value.
+
+ * * @return   The fractional part of `x`.
+ */
 inline float Frac(float x)
 {
     return x - std::floor(x);
 }
 
-/// Integer-grid value-noise hash in [0,1). Shared by the text energy effects
-/// and the particle drift so both draw from the same quality noise field.
+/**
+ * @brief Compute the integer-grid hash for value noise.
+ *
+ * Text energy effects and particle
+ * drift reach this function through `ValueNoise` and
+ * `FBMNoise`, so they sample the same noise
+ * field.
+ *
+ * @param x  Grid X coordinate.
+ * @param y  Grid Y coordinate.
+ * @return   A value in
+ * [0, 1).
+ */
 inline float NoiseHash(float x, float y)
 {
     size_t hash = static_cast<size_t>(static_cast<int>(x));
@@ -91,7 +112,14 @@ inline float NoiseHash(float x, float y)
     return static_cast<float>(hash & 0xFFFFFF) / 16777216.0f;  // [0, 1)
 }
 
-/// 2D value noise with quintic interpolation, range [0,1).
+/**
+ * @brief Compute two-dimensional value noise with quintic interpolation.
+ *
+ * @param x  Sample
+ * X coordinate.
+ * @param y  Sample Y coordinate.
+ * @return   A value in [0, 1).
+ */
 inline float ValueNoise(float x, float y)
 {
     float ix = std::floor(x);
@@ -99,7 +127,7 @@ inline float ValueNoise(float x, float y)
     float fx = x - ix;
     float fy = y - iy;
 
-    // Quintic interpolation curve for smoother results
+    // Quintic interpolation curve
     fx = fx * fx * fx * (fx * (fx * 6.0f - 15.0f) + 10.0f);
     fy = fy * fy * fy * (fy * (fy * 6.0f - 15.0f) + 10.0f);
 
@@ -113,11 +141,29 @@ inline float ValueNoise(float x, float y)
     return ab + (cd - ab) * fy;
 }
 
-/// Fractal Brownian Motion built from ValueNoise, range [0,1).
-/// Shared by Enchant/Frost text shading and the M1 falling-particle drift.
+/**
+ * @brief Compute fractal Brownian motion from value noise.
+ *
+ * Enchant text shading and
+ * falling-particle drift share this function. Frost and Sparkle use
+ * the file-local integer-grid
+ * hash in `TextEffectsComplex.cpp` because they require hard cell
+ * edges.
+ *
+ * @param x Sample X
+ * coordinate.
+ * @param y            Sample Y coordinate.
+ * @param octaves      Number of noise
+ * octaves, capped at eight.
+ * @param persistence  Amplitude multiplier for each successive
+ * octave.
+ * @return             The accumulated value, normally in [0, 1).
+ */
 inline float FBMNoise(float x, float y, int octaves, float persistence = .5f)
 {
-    // Cap octaves to prevent excessive computation and float overflow in frequency
+    // Capped at 8 octaves. Each octave costs one ValueNoise sample and doubles the
+    // sample frequency; at the default persistence the 8th already carries 1/128 of
+    // the first octave's weight, so further octaves only cost time.
     octaves = std::min(octaves, 8);
 
     float total = .0f;
@@ -136,74 +182,112 @@ inline float FBMNoise(float x, float y, int octaves, float persistence = .5f)
     return total / maxValue;
 }
 
-/// Convert HSV color to RGBA.
-/// @param h  Hue in [0,1], wraps around.
-/// @param s  Saturation [0,1].
-/// @param v  Value/brightness [0,1].
-/// @param a  Alpha [0,1].
-/// @return RGBA color as ImVec4.
+/**
+ * @brief Convert an HSV color to RGBA.
+ *
+ * Production effects use
+ * `ImGui::ColorConvertHSVtoRGB` instead. The tests in
+ * `tests/test_utils.cpp` contain a separate
+ * implementation. Keep both implementations in
+ * sync.
+ *
+ * @param h  Hue in [0, 1]. The value
+ * wraps.
+ * @param s  Saturation in [0, 1].
+ * @param v  Brightness in [0, 1].
+ * @param a  Alpha
+ * in [0, 1].
+ * @return   The RGBA color.
+ */
 ImVec4 HSVtoRGB(float h, float s, float v, float a);
 
-/// Extract alpha channel [0-255] from a packed ImU32 color.
+/**
+ * @brief Extract the alpha channel from a packed ImU32 color.
+ *
+ * @param c  Packed color.
+ *
+ * @return   The alpha value in [0, 255].
+ */
 inline int GetA(ImU32 c)
 {
     return (c >> IM_COL32_A_SHIFT) & 0xFF;
 }
 
-/// Create a new color with scaled alpha (preserves RGB).
+/**
+ * @brief Scale the alpha channel and preserve the RGB channels.
+ *
+ * This helper has no
+ * production caller.
+ *
+ * @param c    Packed color.
+ * @param mul  Alpha multiplier.
+ * @return
+ * The color with its alpha clamped to [0, 255].
+ */
 inline ImU32 WithAlpha(ImU32 c, float mul)
 {
-    // Extract RGBA components
     const int r = (c >> IM_COL32_R_SHIFT) & 0xFF;
     const int g = (c >> IM_COL32_G_SHIFT) & 0xFF;
     const int b = (c >> IM_COL32_B_SHIFT) & 0xFF;
     const int a = (c >> IM_COL32_A_SHIFT) & 0xFF;
 
-    // Scale alpha and clamp to valid range
     const int na = (int)std::clamp(a * mul, .0f, 255.0f);
 
-    // Repack color with new alpha
     return IM_COL32(r, g, b, na);
 }
 
-/// Scale RGB channels by a multiplier, preserving alpha.
+/**
+ * @brief Scale the RGB channels and preserve the alpha channel.
+ *
+ * This helper is used only
+ * by the example in the header documentation.
+ *
+ * @param c    Packed color.
+ * @param mul
+ * Non-negative RGB multiplier. Negative values are clamped to zero.
+ * @return     The scaled
+ * color.
+ */
 inline ImU32 ScaleRGB(ImU32 c, float mul)
 {
     mul = std::max(.0f, mul);  // Prevent negative colors
 
-    // Extract channels
     const int r = (c >> IM_COL32_R_SHIFT) & 0xFF;
     const int g = (c >> IM_COL32_G_SHIFT) & 0xFF;
     const int b = (c >> IM_COL32_B_SHIFT) & 0xFF;
     const int a = (c >> IM_COL32_A_SHIFT) & 0xFF;
 
-    // Scale RGB and clamp to valid range
     const int nr = (int)std::clamp(r * mul, .0f, 255.0f);
     const int ng = (int)std::clamp(g * mul, .0f, 255.0f);
     const int nb = (int)std::clamp(b * mul, .0f, 255.0f);
 
-    // Repack with original alpha
     return IM_COL32(nr, ng, nb, a);
 }
 
-/// Captures ImGui vertex buffer state after rendering white text, enabling
-/// callers to recolor vertices per-effect.
-///
-/// Members:
-/// - @c list       Draw list pointer (must remain valid for the recolor pass).
-/// - @c vtxStart / @c vtxEnd  Vertex index range written by the text call.
-/// - @c bbMin / @c bbMax      Bounding box of the text in screen pixels.
-///
-/// width() / height() return clamped dimensions (minimum 1e-3f to avoid
-/// division by zero).  normalizedX() / normalizedY() return [0,1] within
-/// the bounding box.
+/**
+ * @struct TextVertexSetup
+ * @brief Vertex state captured after a white text draw.
+ *
+ *
+ * Callers use the captured range to recolor vertices for one effect. The members have no
+ *
+ * defaults and are valid only after `Begin` returns true. Do not read a member after a false
+ *
+ * return.
+ *
+ * The bounding box covers the complete string, not one glyph. Normalized coordinates
+ * use the
+ * complete text run. `width` and `height` clamp to 1e-3 to prevent division by zero.
+ *
+ * `normalizedX` and `normalizedY` return coordinates in [0, 1] inside the bounding box.
+ */
 struct TextVertexSetup
 {
-    ImDrawList* list;
-    int vtxStart;
-    int vtxEnd;
-    ImVec2 bbMin;
-    ImVec2 bbMax;
+    ImDrawList* list;  ///< Draw list; must stay valid for the recolor pass
+    int vtxStart;      ///< First vertex index written by the text call
+    int vtxEnd;        ///< One past the last vertex index written by the text call
+    ImVec2 bbMin;      ///< Top-left of the text bounding box, in screen pixels
+    ImVec2 bbMax;      ///< Bottom-right of the text bounding box, in screen pixels
 
     float width() const { return (std::max)(bbMax.x - bbMin.x, 1e-3f); }
     float height() const { return (std::max)(bbMax.y - bbMin.y, 1e-3f); }
@@ -211,10 +295,28 @@ struct TextVertexSetup
     float normalizedY(float y) const { return (y - bbMin.y) / height(); }
     ImVec2 center() const { return ImVec2((bbMin.x + bbMax.x) * .5f, (bbMin.y + bbMax.y) * .5f); }
 
-    /// Render text in white (IM_COL32_WHITE) so the vertex buffer is
-    /// populated, then record the vertex range and bounding box.  Callers
-    /// recolor the vertices afterward based on the desired effect.
-    /// @return true if vertices were added.
+    /**
+     * @brief Draw white text and capture its emitted vertex range.
+     *
+     * The white
+     * color is a placeholder. The caller replaces the color of each vertex in the
+     * range.
+ *
+
+     * * @param out   Receives the draw list, vertex range, and bounding box on success.
+     *
+     * @param list  ImGui draw list.
+     * @param font  Font used to draw the text.
+     * @param
+     * size  Font size, in pixels.
+     * @param pos   Top-left text position.
+     * @param text
+     * Null-terminated UTF-8 text.
+     * @return      True when the draw adds vertices. False for a
+     * null input, empty text, or a
+     *              draw that adds no vertices. Do not read
+     * `out` after a false return.
+     */
     static bool Begin(TextVertexSetup& out,
                       ImDrawList* list,
                       ImFont* font,
@@ -223,7 +325,31 @@ struct TextVertexSetup
                       const char* text);
 };
 
-/// Draw concentric glow rings behind the text outline.
+/**
+ * @brief Draw concentric glow rings behind a text outline.
+ *
+ * This declaration repeats the
+ * public entry point. `TextEffects.hpp` documents the ring
+ * radius and alpha formulas.
+ *
+ *
+ * @param list          ImGui draw list.
+ * @param font          Font used to draw the text.
+ *
+ * @param size          Font size, in pixels.
+ * @param pos           Top-left text position.
+ *
+ * @param text          Null-terminated UTF-8 text.
+ * @param glowColor     Glow color.
+ * @param
+ * outlineWidth  Outline width, in pixels.
+ * @param glowScale     Radius multiplier for the glow.
+
+ * * @param glowAlpha     Peak glow opacity.
+ * @param rings         Number of concentric rings.
+ *
+ * @param fastOutlines  Whether to use the four-direction outline path.
+ */
 void DrawOutlineGlow(ImDrawList* list,
                      ImFont* font,
                      float size,
@@ -236,8 +362,25 @@ void DrawOutlineGlow(ImDrawList* list,
                      int rings,
                      bool fastOutlines);
 
-/// Draw text outline using 4 cardinal directions (N/S/E/W).
-/// Faster but less smooth than 8-dir.
+/**
+ * @brief Draw a text outline with four cardinal stamps.
+ *
+ * This path costs less than the
+ * ring variant and produces a less smooth outline.
+ *
+ * @param list     ImGui draw list.
+ * @param
+ * font     Font used to draw the text.
+ * @param size     Font size, in pixels.
+ * @param pos
+ * Top-left text position.
+ * @param text     Null-terminated UTF-8 text.
+ * @param outline  Outline
+ * color.
+ * @param w        Outline width, in pixels.
+ * @pre `list`, `font`, and `text` are not
+ * null.
+ */
 void DrawOutline4Internal(ImDrawList* list,
                           ImFont* font,
                           float size,
@@ -246,8 +389,28 @@ void DrawOutline4Internal(ImDrawList* list,
                           ImU32 outline,
                           float w);
 
-/// Draw text outline using 8 directions (cardinals + diagonals).
-/// Smoother than 4-dir.
+/**
+ * @brief Draw a circular text outline with eight through 24 stamps.
+ *
+ * The tap count is
+ * `clamp(ceil(pi * w), 8, 24)`. This is approximately one stamp per two
+ * pixels of circumference.
+ * A half-step phase offset moves the stamps away from the cardinal
+ * axes. This path is smoother
+ * than the four-stamp variant.
+ *
+ * @param list     ImGui draw list.
+ * @param font     Font used
+ * to draw the text.
+ * @param size     Font size, in pixels.
+ * @param pos      Top-left text
+ * position.
+ * @param text     Null-terminated UTF-8 text.
+ * @param outline  Outline color.
+ *
+ * @param w        Outline radius, in pixels.
+ * @pre `list`, `font`, and `text` are not null.
+ */
 void DrawOutline8Internal(ImDrawList* list,
                           ImFont* font,
                           float size,
@@ -256,7 +419,28 @@ void DrawOutline8Internal(ImDrawList* list,
                           ImU32 outline,
                           float w);
 
-/// Draw text outline, delegating to 4-dir or 8-dir based on @p fastOutlines.
+/**
+ * @brief Select and draw one internal text-outline variant.
+ *
+ * `fastOutlines` selects the
+ * four-stamp path. Otherwise, the function selects the circular
+ * ring path.
+ *
+ * @param list
+ * ImGui draw list.
+ * @param font          Font used to draw the text.
+ * @param size          Font
+ * size, in pixels.
+ * @param pos           Top-left text position.
+ * @param text Null-terminated
+ * UTF-8 text.
+ * @param outline       Outline color.
+ * @param w             Outline width, in
+ * pixels.
+ * @param fastOutlines  Whether to use the four-stamp path.
+ * @pre `list`, `font`, and
+ * `text` are not null.
+ */
 void DrawOutlineInternal(ImDrawList* list,
                          ImFont* font,
                          float size,
@@ -266,9 +450,21 @@ void DrawOutlineInternal(ImDrawList* list,
                          float w,
                          bool fastOutlines);
 
-/// Blend three colors continuously using smoothstep transitions.
-/// Produces a seamless gradient A->Mid->B with no visible breakpoints.
-/// @param t  Interpolation value [0, 1].
+/**
+ * @brief Blend three colors with smoothstep transitions.
+ *
+ * The result moves from A to Mid
+ * to B without a visible breakpoint. This helper has no
+ * production caller.
+ *
+ * @param colA
+ * Color at `t = 0`.
+ * @param colMid  Color at `t = 0.5`.
+ * @param colB    Color at `t = 1`.
+ *
+ * @param t       Interpolation value in [0, 1].
+ * @return        The blended packed color.
+ */
 inline ImU32 ThreeColorGradient(ImU32 colA, ImU32 colMid, ImU32 colB, float t)
 {
     t = Saturate(t);
@@ -277,12 +473,21 @@ inline ImU32 ThreeColorGradient(ImU32 colA, ImU32 colMid, ImU32 colB, float t)
     return LerpColorU32(LerpColorU32(colA, colMid, s1), colB, s2);
 }
 
-/// Deep jewel shade of a color: value down, saturation up, alpha preserved.
-///
-/// Animated effects sweep between this shade and a hot highlight so they
-/// carry their OWN contrast. Tier palettes are same-family pairs only ~15%
-/// apart on bright bases -- far too narrow to animate visibly, which is why
-/// the pre-overhaul effects read as invisible.
+/**
+ * @brief Make a color darker and more saturated while preserving alpha.
+ *
+ * Tier palettes can
+ * contain bright colors with only a small difference. Animated effects
+ * sweep between this shade
+ * and a hot highlight to create visible contrast.
+ *
+ * @param c       Packed source color.
+ *
+ * @param valMul  Brightness multiplier.
+ * @param satMul  Saturation multiplier.
+ * @return The
+ * adjusted packed color.
+ */
 inline ImU32 DeepShade(ImU32 c, float valMul = .55f, float satMul = 1.35f)
 {
     const int r = (c >> IM_COL32_R_SHIFT) & 0xFF;
@@ -301,8 +506,18 @@ inline ImU32 DeepShade(ImU32 c, float valMul = .55f, float satMul = 1.35f)
                     a);
 }
 
-/// Hot highlight: push a color toward pure white, keeping a trace of its
-/// hue and its alpha. The bright pole of the DeepShade<->Hot sweep.
+/**
+ * @brief Move a color toward white while preserving its alpha.
+ *
+ * This function supplies the
+ * bright endpoint of the `DeepShade` and `HotHighlight` sweep.
+ *
+ * @param c          Packed
+ * source color.
+ * @param whiteness  Blend factor toward white.
+ * @return           The adjusted
+ * packed color.
+ */
 inline ImU32 HotHighlight(ImU32 c, float whiteness = .75f)
 {
     const int a = (c >> IM_COL32_A_SHIFT) & 0xFF;
@@ -310,12 +525,20 @@ inline ImU32 HotHighlight(ImU32 c, float whiteness = .75f)
     return LerpColorU32(c, white, Saturate(whiteness));
 }
 
-/// Repack a color's RGB with the alpha channel of another color.
-///
-/// The tier highlight arrives packed with the (low) effectAlpha, and
-/// LerpColorU32 lerps all four channels -- so a sweep toward the raw
-/// highlight made text MORE TRANSPARENT exactly where it brightened,
-/// self-canceling. Every bright sweep target must adopt the fill's alpha.
+/**
+ * @brief Combine the RGB channels of one color with the alpha of another.
+ *
+ * `LerpColorU32`
+ * interpolates all four channels. A bright sweep target must adopt the fill
+ * alpha, or the text
+ * becomes more transparent where it becomes brighter.
+ *
+ * @param rgbSrc    Color that supplies
+ * the RGB channels.
+ * @param alphaSrc  Color that supplies the alpha channel.
+ * @return The
+ * repacked color.
+ */
 inline ImU32 WithAlphaFrom(ImU32 rgbSrc, ImU32 alphaSrc)
 {
     constexpr ImU32 kAlphaMask = static_cast<ImU32>(0xFF) << IM_COL32_A_SHIFT;
