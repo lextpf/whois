@@ -1,14 +1,50 @@
 #pragma once
 
 /**
- * TrueHUD API -- vendored interface header.
+ * @namespace TRUEHUD_API
+ * @brief Vendored TrueHUD API interface used for HUD compatibility.
+ * @author Ershin (https://github.com/ersh1)
+ * @ingroup Utilities
  *
- * Condensed from Ershin's TrueHUD (https://github.com/ersh1/TrueHUD,
- * src/TrueHUDAPI.h, MIT license).  glyph only *calls*
- * `RequestPluginAPI` and `IVTrueHUD3::HasInfoBar`; every other virtual is
- * declared solely to keep the vtable layout identical to the original
- * header, so their parameter types matter only for slot count, never for
- * calls.  Do not reorder or remove entries.
+ * This interface is a condensed copy of `src/TrueHUDAPI.h` from TrueHUD. TrueHUD uses the MIT
+ * license. glyph calls only `RequestPluginAPI` and `IVTrueHUD3::HasInfoBar`. The other virtual
+ * functions preserve the original vtable layout. Do not reorder or remove them.
+ *
+ * ```mermaid
+ * ---
+ * config:
+ *   theme: dark
+ *   look: handDrawn
+ * ---
+ * classDiagram
+ *     direction LR
+ *     class InterfaceVersion {
+ *         <<enumeration>>
+ *         V1
+ *         V2
+ *         V3
+ *         V4
+ *     }
+ *     class IVTrueHUD1 {
+ *         <<interface>>
+ *         +RequestTargetControl()
+ *         +AddActorInfoBar()
+ *     }
+ *     class IVTrueHUD2 {
+ *         <<interface>>
+ *         +OverrideBarColor()
+ *     }
+ *     class IVTrueHUD3 {
+ *         <<interface>>
+ *         +DrawLine()
+ *         +HasInfoBar()
+ *     }
+ *     IVTrueHUD1 <|-- IVTrueHUD2
+ *     IVTrueHUD2 <|-- IVTrueHUD3
+ *     InterfaceVersion ..> IVTrueHUD3 : RequestPluginAPI with V3
+ *     note for IVTrueHUD3 "glyph calls only HasInfoBar"
+ *     note for InterfaceVersion "V4 has no interface class in this vendored subset"
+ * ```
  */
 
 #include <cstdint>
@@ -22,7 +58,10 @@ namespace TRUEHUD_API
 {
 constexpr const auto TrueHUDPluginName = "TrueHUD";
 
-/// Available interface versions.
+/**
+ * @enum InterfaceVersion
+ * @brief Available TrueHUD interface versions.
+ */
 enum class InterfaceVersion : uint8_t
 {
     V1,
@@ -31,7 +70,10 @@ enum class InterfaceVersion : uint8_t
     V4
 };
 
-/// Error types returned by the TrueHUD API.
+/**
+ * @enum APIResult
+ * @brief Result codes returned by the TrueHUD API.
+ */
 enum class APIResult : uint8_t
 {
     OK,
@@ -43,7 +85,10 @@ enum class APIResult : uint8_t
     BadThread,
 };
 
-/// Widget removal behavior.
+/**
+ * @enum WidgetRemovalMode
+ * @brief Available widget removal behaviors.
+ */
 enum class WidgetRemovalMode : uint8_t
 {
     Immediate,
@@ -51,7 +96,12 @@ enum class WidgetRemovalMode : uint8_t
     Delayed,
 };
 
-/// Bar color types (V2 color overrides -- unused by glyph).
+/**
+ * @enum BarColorType
+ * @brief Bar color channels supported by TrueHUD interface version 2.
+ *
+ * glyph does not use these color overrides.
+ */
 enum class BarColorType : uint8_t
 {
     FlashColor,
@@ -66,7 +116,10 @@ class WidgetBase;
 using SpecialResourceCallback = std::function<float(RE::Actor* a_actor)>;
 using APIResultCallback = std::function<void(APIResult)>;
 
-/// TrueHUD's modder interface, version 1.
+/**
+ * @class IVTrueHUD1
+ * @brief TrueHUD mod interface version 1.
+ */
 class IVTrueHUD1
 {
 public:
@@ -119,7 +172,13 @@ public:
         SKSE::PluginHandle a_myPluginHandle) noexcept = 0;
 };
 
-/// Version 2: per-bar color overrides (unused by glyph; vtable slots only).
+/**
+ * @class IVTrueHUD2
+ * @brief TrueHUD mod interface version 2.
+ *
+ * This version adds per-bar color overrides. glyph keeps the functions only to preserve the
+ * vtable layout.
+ */
 class IVTrueHUD2 : public IVTrueHUD1
 {
 public:
@@ -137,7 +196,12 @@ public:
                                             BarColorType a_colorType) noexcept = 0;
 };
 
-/// Version 3: debug drawing (unused) + HasInfoBar (the query glyph needs).
+/**
+ * @class IVTrueHUD3
+ * @brief TrueHUD mod interface version 3.
+ *
+ * This version adds debug drawing and `HasInfoBar`. glyph uses only `HasInfoBar`.
+ */
 class IVTrueHUD3 : public IVTrueHUD2
 {
 public:
@@ -208,17 +272,29 @@ public:
                              uint32_t a_color = 0xFF0000FF,
                              float a_thickness = 1.f) noexcept = 0;
 
-    /// True when TrueHUD currently displays an info bar for the actor.
-    /// `a_bFloatingOnly` restricts the answer to bars floating over the
-    /// actor's head (the ones a nameplate would collide with).
+    /**
+     * @brief Report whether TrueHUD displays an info bar for an actor.
+     *
+     * When `a_bFloatingOnly` is true, the query includes only bars that float above the
+     * actor's head and can overlap a nameplate.
+     *
+     * @param a_actorHandle    Actor to query.
+     * @param a_bFloatingOnly  Whether to include only floating bars.
+     * @return                 True when a matching info bar is visible.
+     */
     [[nodiscard]] virtual bool HasInfoBar(RE::ActorHandle a_actorHandle,
                                           bool a_bFloatingOnly = false) const noexcept = 0;
 };
 
 using _RequestPluginAPI = void* (*)(const InterfaceVersion interfaceVersion);
 
-/// Request the TrueHUD API interface.
-/// Returns nullptr when TrueHUD is absent or too old for the version asked.
+/**
+ * @brief Request a TrueHUD API interface.
+ *
+ * @param a_interfaceVersion  Required interface version.
+ * @return                    The interface pointer, or nullptr when TrueHUD is absent or does
+ *                            not support the requested version.
+ */
 [[nodiscard]] inline void* RequestPluginAPI(
     const InterfaceVersion a_interfaceVersion = InterfaceVersion::V3)
 {
@@ -227,8 +303,8 @@ using _RequestPluginAPI = void* (*)(const InterfaceVersion interfaceVersion);
     {
         return nullptr;
     }
-    const auto requestAPIFunction = reinterpret_cast<_RequestPluginAPI>(
-        GetProcAddress(pluginHandle, "RequestPluginAPI"));
+    const auto requestAPIFunction =
+        reinterpret_cast<_RequestPluginAPI>(GetProcAddress(pluginHandle, "RequestPluginAPI"));
     if (requestAPIFunction)
     {
         return requestAPIFunction(a_interfaceVersion);
