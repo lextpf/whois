@@ -1,16 +1,15 @@
-/**
- * Unit tests for the contextual nameplate label/token system.
- *
- * Per CLAUDE.md, tests deliberately re-implement the logic under test
- * (Actor / CommonLibSSE / ImGui cannot link in the test harness), so the
- * fixtures below mirror the production code in:
- *   - src/RendererSnapshot.cpp        -- ClassifyDelta
- *   - src/RendererLayout.cpp          -- FormatString, LabelFor
- *   - src/RendererInternal.hpp        -- RelationshipKind/LevelDelta/CreatureKind,
- * ActorLabelContext
- *
- * When you change either the production code or this mirror, keep them in sync.
- */
+// Unit tests for the contextual nameplate label/token system.
+//
+// Per CLAUDE.md, tests deliberately re-implement the logic under test
+// (RE::Actor / CommonLibSSE / ImGui cannot link in the test harness), so the
+// fixtures below mirror the production code in:
+//   - src/RendererSnapshot.cpp   -- ClassifyDelta
+//   - src/RendererLayout.cpp     -- FormatString, LabelFor
+//   - src/RendererInternal.hpp   -- RelationshipKind / LevelDelta / CreatureKind,
+//                                   ActorLabelContext
+//
+// This mirror goes stale silently. When you change either side, update the
+// other in the same commit.
 
 #include <gtest/gtest.h>
 
