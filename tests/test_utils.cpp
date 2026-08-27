@@ -1,11 +1,20 @@
-/**
- * Unit tests for glyph utility functions using Google Test.
- *
- * Tests core math and color manipulation functions that are independent
- * of the game runtime.
- */
+// Unit tests for glyph utility functions using Google Test.
+//
+// Tests core math and color manipulation functions that are independent of the
+// game runtime.
+//
+// The harness links no game code, so most helpers below are MIRRORS: the
+// production logic is copied here, not included. A mirror goes stale silently,
+// so change the copy in the same edit that changes the production function.
+// NameFit.hpp and RenderConstants.hpp are runtime-free and are included for
+// real.
 
 #include <gtest/gtest.h>
+
+#include "NameFit.hpp"
+#include "RasterQuality.hpp"
+#include "RenderConstants.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -13,7 +22,9 @@
 #include <vector>
 
 // ============================================================================
-// Re-implement functions under test (same logic as TextEffects.cpp)
+// Re-implement functions under test: Saturate and SmoothStep mirror the
+// constexpr helpers in src/TextEffects.hpp; LerpColorU32 mirrors
+// src/TextEffectsCore.cpp.
 // ============================================================================
 
 float Saturate(float x)
@@ -122,6 +133,26 @@ ImVec4 HSVtoRGB(float h, float s, float v, float a)
             break;
     }
     return {r + m, g + m, b + m, a};
+}
+
+// ============================================================================
+// Tests: fixed crisp-layer raster quality
+// ============================================================================
+
+TEST(RasterQualityTest, BadgeTextureSizesArePowersOfTwo)
+{
+    EXPECT_EQ(RasterQuality::STATUS_ICON_TEXTURE_SIZE, 256);
+    EXPECT_EQ(RasterQuality::RANK_EMBLEM_TEXTURE_SIZE, 512);
+    EXPECT_TRUE(RasterQuality::IsPowerOfTwo(RasterQuality::STATUS_ICON_TEXTURE_SIZE));
+    EXPECT_TRUE(RasterQuality::IsPowerOfTwo(RasterQuality::RANK_EMBLEM_TEXTURE_SIZE));
+}
+
+TEST(RasterQualityTest, GlyphPaddingSupportsFontMipLimit)
+{
+    EXPECT_EQ(RasterQuality::FONT_GLYPH_PADDING, 8);
+    EXPECT_EQ(RasterQuality::FONT_MIP_LIMIT, 3);
+    EXPECT_GE(RasterQuality::FONT_GLYPH_PADDING, 1 << RasterQuality::FONT_MIP_LIMIT);
+    EXPECT_TRUE(RasterQuality::FontPaddingSupportsMipLimit());
 }
 
 // ============================================================================
@@ -963,7 +994,7 @@ struct BadgeSlot
     TestColor color;
     bool muted = false;
     bool pulse = false;
-    int tierImage = -1;  ///< >=0 -> full-color emblem by index (icon unused)
+    int tierImage = -1;  // >=0 -> full-color emblem by index (icon unused)
 };
 
 struct BadgeComposition
@@ -986,7 +1017,8 @@ struct BadgeComposition
 BadgeComposition ComposeBadges(const Facts& d,
                                const IconCfg& cfg,
                                int tierIdx = 0,
-                               int tierCount = 20)
+                               int tierCount = 20,
+                               bool includeRank = true)
 {
     BadgeComposition out{};
     if (!cfg.enabled)
@@ -999,8 +1031,29 @@ BadgeComposition ComposeBadges(const Facts& d,
             out.push(icon, color, muted, pulse);
     };
 
+    const auto addRank = [&]()
+    {
+        if (!includeRank)
+            return;
+        if (cfg.tierBadgeImages && cfg.tierImageCount > 0)
+        {
+            out.pushTierImage(
+                cfg.tierEnabled,
+                TierImageBandIndex(tierIdx, tierCount, cfg.tierImageCount, cfg.tierBadgeGamma));
+            return;
+        }
+
+        const int band = TierBandIndex(tierIdx, tierCount);
+        add(cfg.tierEnabled,
+            band == 2 ? cfg.icoTierHigh : (band == 1 ? cfg.icoTierMid : cfg.icoTierLow),
+            band == 2 ? cfg.colTierHigh : (band == 1 ? cfg.colTierMid : cfg.colTierLow),
+            false);
+    };
+
     if (!d.isPlayer)
     {
+        addRank();
+
         switch (d.relationship)
         {
             case RelKind::Hostile:
@@ -1094,22 +1147,7 @@ BadgeComposition ComposeBadges(const Facts& d,
         return out;
     }
 
-    // Tier band: prestige indicator, always lit, first player slot.  Emblem
-    // images when loaded, else the low/mid/high FA icon.
-    if (cfg.tierBadgeImages && cfg.tierImageCount > 0)
-    {
-        out.pushTierImage(
-            cfg.tierEnabled,
-            TierImageBandIndex(tierIdx, tierCount, cfg.tierImageCount, cfg.tierBadgeGamma));
-    }
-    else
-    {
-        const int band = TierBandIndex(tierIdx, tierCount);
-        add(cfg.tierEnabled,
-            band == 2 ? cfg.icoTierHigh : (band == 1 ? cfg.icoTierMid : cfg.icoTierLow),
-            band == 2 ? cfg.colTierHigh : (band == 1 ? cfg.colTierMid : cfg.colTierLow),
-            false);
-    }
+    addRank();
 
     switch (d.sneak)
     {
@@ -1173,38 +1211,58 @@ TestColor ApplyMutedDesat(TestColor c, float desat)
     return {c.r + (luma - c.r) * desat, c.g + (luma - c.g) * desat, c.b + (luma - c.b) * desat};
 }
 
+// Mirror of the DrawBadges alpha treatment. IconOpacity applies to the status
+// row before the optional resting-state multiplier.
+float ResolveBadgeAlpha(
+    float plateAlpha, float badgeAlphaMul, float iconOpacity, bool muted, float mutedAlpha)
+{
+    float alpha = std::min(1.0f, plateAlpha * badgeAlphaMul * iconOpacity);
+    if (muted)
+        alpha *= mutedAlpha;
+    return alpha;
+}
+
+// Mirror of the DrawTierEmblem crisp-mark alpha treatment.
+float ResolveTierEmblemAlpha(float plateAlpha, float badgeAlphaMul, float crispAlpha)
+{
+    return plateAlpha * badgeAlphaMul * crispAlpha;
+}
+
 // ============================================================================
 // Tests: ComposeBadges (always-on slot model)
 // ============================================================================
 
-TEST(ComposeBadgesTest, NpcAlwaysHasSixSlots)
+TEST(ComposeBadgesTest, NpcAlwaysHasSevenSlots)
 {
     auto s = ComposeBadges(Facts{}, IconCfg{});  // all-neutral commoner
-    ASSERT_EQ(s.slots.size(), 6u);
-    for (const auto& slot : s.slots)
+    ASSERT_EQ(s.slots.size(), 7u);
+    EXPECT_EQ(s.slots[0].icon, "medal");  // rank is an always-lit identity fact
+    EXPECT_FALSE(s.slots[0].muted);
+    for (size_t i = 1; i < s.slots.size(); ++i)
     {
-        EXPECT_TRUE(slot.muted);  // every neutral slot renders muted
+        EXPECT_TRUE(s.slots[i].muted);  // every neutral status slot renders muted
     }
 }
 
-TEST(ComposeBadgesTest, NpcSlotOrderRelationshipFirst)
+TEST(ComposeBadgesTest, NpcRankPrecedesStatusRow)
 {
     Facts f;
     f.relationship = RelKind::Follower;
     auto s = ComposeBadges(f, IconCfg{});
-    ASSERT_EQ(s.slots.size(), 6u);
-    EXPECT_EQ(s.slots[0].icon, "shield-halved");  // relationship is slot 0
-    EXPECT_FALSE(s.slots[0].muted);
-    EXPECT_FLOAT_EQ(s.slots[0].color.b, 0.84f);  // colFollower
+    ASSERT_EQ(s.slots.size(), 7u);
+    EXPECT_EQ(s.slots[0].icon, "medal");          // rank is slot 0
+    EXPECT_EQ(s.slots[1].icon, "shield-halved");  // relationship starts the status row
+    EXPECT_FALSE(s.slots[1].muted);
+    EXPECT_FLOAT_EQ(s.slots[1].color.b, 0.84f);  // colFollower
 }
 
 TEST(ComposeBadgesTest, NeutralRelationshipUsesRestingColor)
 {
     auto s = ComposeBadges(Facts{}, IconCfg{});
-    EXPECT_EQ(s.slots[0].icon, "circle");
-    EXPECT_TRUE(s.slots[0].muted);               // still drawn dimmed, but in its own hue
-    EXPECT_FLOAT_EQ(s.slots[0].color.r, 0.56f);  // colNeutral
-    EXPECT_FLOAT_EQ(s.slots[0].color.g, 0.62f);
+    EXPECT_EQ(s.slots[1].icon, "circle");
+    EXPECT_TRUE(s.slots[1].muted);               // still drawn dimmed, but in its own hue
+    EXPECT_FLOAT_EQ(s.slots[1].color.r, 0.56f);  // colNeutral
+    EXPECT_FLOAT_EQ(s.slots[1].color.g, 0.62f);
 }
 
 TEST(ComposeBadgesTest, NewNpcSlotsLitWhenActive)
@@ -1214,13 +1272,13 @@ TEST(ComposeBadgesTest, NewNpcSlotsLitWhenActive)
     f.protection = ProtK::Essential;
     f.engagement = EngK::Combat;
     auto s = ComposeBadges(f, IconCfg{});
-    ASSERT_EQ(s.slots.size(), 6u);
-    EXPECT_EQ(s.slots[2].icon, "coins");  // role
-    EXPECT_FALSE(s.slots[2].muted);
-    EXPECT_EQ(s.slots[3].icon, "certificate");  // protection
+    ASSERT_EQ(s.slots.size(), 7u);
+    EXPECT_EQ(s.slots[3].icon, "coins");  // role
     EXPECT_FALSE(s.slots[3].muted);
-    EXPECT_EQ(s.slots[5].icon, "swords");  // engagement
-    EXPECT_FALSE(s.slots[5].muted);
+    EXPECT_EQ(s.slots[4].icon, "certificate");  // protection
+    EXPECT_FALSE(s.slots[4].muted);
+    EXPECT_EQ(s.slots[6].icon, "swords");  // engagement
+    EXPECT_FALSE(s.slots[6].muted);
 }
 
 TEST(ComposeBadgesTest, DeadlyThreatPulsesWeakDoesNot)
@@ -1228,13 +1286,13 @@ TEST(ComposeBadgesTest, DeadlyThreatPulsesWeakDoesNot)
     Facts deadly;
     deadly.levelDelta = LvlDelta::Deadly;
     auto sd = ComposeBadges(deadly, IconCfg{});
-    EXPECT_EQ(sd.slots[4].icon, "skull");  // threat is slot 4
-    EXPECT_TRUE(sd.slots[4].pulse);
+    EXPECT_EQ(sd.slots[5].icon, "skull");  // threat is slot 5 after rank
+    EXPECT_TRUE(sd.slots[5].pulse);
     Facts weak;
     weak.levelDelta = LvlDelta::Weak;
     auto sw = ComposeBadges(weak, IconCfg{});
-    EXPECT_EQ(sw.slots[4].icon, "caret-down");
-    EXPECT_FALSE(sw.slots[4].pulse);
+    EXPECT_EQ(sw.slots[5].icon, "caret-down");
+    EXPECT_FALSE(sw.slots[5].pulse);
 }
 
 TEST(ComposeBadgesTest, PlayerGetsFivePlayerSlots)
@@ -1374,16 +1432,41 @@ TEST(ComposeBadgesTest, TierDisabledDropsSlot)
     }
 }
 
-TEST(ComposeBadgesTest, NpcNeverGetsTierBadge)
+TEST(ComposeBadgesTest, NpcGetsRankBadge)
 {
     Facts f;  // NPC facts
     auto s = ComposeBadges(f, IconCfg{}, 19, 20);
-    for (const auto& slot : s.slots)
-    {
-        EXPECT_NE(slot.icon, "crown");
-        EXPECT_NE(slot.icon, "gem");
-        EXPECT_NE(slot.icon, "medal");
-    }
+    ASSERT_EQ(s.slots.size(), 7u);
+    EXPECT_EQ(s.slots[0].icon, "crown");
+    EXPECT_FALSE(s.slots[0].muted);
+    EXPECT_EQ(s.slots[1].icon, "circle");  // status ordering remains intact
+}
+
+TEST(ComposeBadgesTest, NpcTierImageUsesEmblemSlot)
+{
+    IconCfg cfg;
+    cfg.tierBadgeImages = true;
+    cfg.tierImageCount = 9;
+    auto s = ComposeBadges(Facts{}, cfg, 19, 20);
+    ASSERT_EQ(s.slots.size(), 7u);
+    EXPECT_EQ(s.slots[0].tierImage, 8);
+    EXPECT_TRUE(s.slots[0].icon.empty());
+}
+
+TEST(ComposeBadgesTest, NpcTierDisabledKeepsSixStatusSlots)
+{
+    IconCfg cfg;
+    cfg.tierEnabled = false;
+    auto s = ComposeBadges(Facts{}, cfg);
+    ASSERT_EQ(s.slots.size(), 6u);
+    EXPECT_EQ(s.slots[0].icon, "circle");
+}
+
+TEST(ComposeBadgesTest, NpcRankCanBeOmittedWhenSurfaceHasSeparateSeal)
+{
+    auto s = ComposeBadges(Facts{}, IconCfg{}, 19, 20, false);
+    ASSERT_EQ(s.slots.size(), 6u);
+    EXPECT_EQ(s.slots[0].icon, "circle");
 }
 
 TEST(ComposeBadgesTest, DisabledGetsNothing)
@@ -1401,7 +1484,7 @@ TEST(ComposeBadgesTest, PerSlotEnableDropsSlot)
     IconCfg cfg{};
     cfg.roleEnabled = false;
     auto s = ComposeBadges(Facts{}, cfg);
-    EXPECT_EQ(s.slots.size(), 5u);  // role slot dropped
+    EXPECT_EQ(s.slots.size(), 6u);  // role slot dropped; rank + five status slots remain
     for (const auto& slot : s.slots)
     {
         EXPECT_NE(slot.icon, "house");
@@ -1416,7 +1499,7 @@ TEST(ComposeBadgesTest, DisabledCombatStateDropsCombatBadge)
     Facts f;
     f.engagement = EngK::Combat;
     auto s = ComposeBadges(f, cfg);
-    EXPECT_EQ(s.slots.size(), 5u);  // engagement slot empty for this actor
+    EXPECT_EQ(s.slots.size(), 6u);  // engagement slot empty; rank remains
     for (const auto& slot : s.slots)
     {
         EXPECT_NE(slot.icon, "swords");
@@ -1430,7 +1513,7 @@ TEST(ComposeBadgesTest, EmptyIconNameDropsSlot)
     Facts f;
     f.relationship = RelKind::Follower;
     auto s = ComposeBadges(f, cfg);
-    EXPECT_EQ(s.slots.size(), 5u);
+    EXPECT_EQ(s.slots.size(), 6u);
     for (const auto& slot : s.slots)
     {
         EXPECT_NE(slot.icon, "shield-halved");
@@ -1442,9 +1525,9 @@ TEST(ComposeBadgesTest, DragonCreatureLitInCreatureColor)
     Facts f;
     f.creatureKind = CritKind::Dragon;
     auto s = ComposeBadges(f, IconCfg{});
-    EXPECT_EQ(s.slots[1].icon, "dragon");  // creature is slot 1
-    EXPECT_FALSE(s.slots[1].muted);
-    EXPECT_FLOAT_EQ(s.slots[1].color.r, 0.80f);  // colCreature
+    EXPECT_EQ(s.slots[2].icon, "dragon");  // creature is slot 2 after rank
+    EXPECT_FALSE(s.slots[2].muted);
+    EXPECT_FLOAT_EQ(s.slots[2].color.r, 0.80f);  // colCreature
 }
 
 // ============================================================================
@@ -1487,6 +1570,48 @@ TEST(MutedStyleTest, ZeroDesatKeepsColor)
     EXPECT_FLOAT_EQ(c.r, 0.2f);
     EXPECT_FLOAT_EQ(c.g, 0.5f);
     EXPECT_FLOAT_EQ(c.b, 0.9f);
+}
+
+TEST(BadgeTreatmentTest, DefaultRestingAndActiveAlphaMatchDuringPlateFades)
+{
+    constexpr float kIconOpacity = 0.92f;
+    constexpr float kDefaultMutedAlpha = 1.0f;
+
+    const float activeFull = ResolveBadgeAlpha(1.0f, 1.0f, kIconOpacity, false, kDefaultMutedAlpha);
+    const float restingFull = ResolveBadgeAlpha(1.0f, 1.0f, kIconOpacity, true, kDefaultMutedAlpha);
+    EXPECT_FLOAT_EQ(restingFull, activeFull);
+
+    const float activeFading =
+        ResolveBadgeAlpha(0.42f, 0.65f, kIconOpacity, false, kDefaultMutedAlpha);
+    const float restingFading =
+        ResolveBadgeAlpha(0.42f, 0.65f, kIconOpacity, true, kDefaultMutedAlpha);
+    EXPECT_FLOAT_EQ(restingFading, activeFading);
+}
+
+TEST(BadgeTreatmentTest, CustomMutedAlphaDimsOnlyRestingBadges)
+{
+    constexpr float kMutedAlpha = 0.35f;
+    const float active = ResolveBadgeAlpha(0.42f, 0.65f, 0.92f, false, kMutedAlpha);
+    const float resting = ResolveBadgeAlpha(0.42f, 0.65f, 0.92f, true, kMutedAlpha);
+
+    EXPECT_NEAR(resting, active * kMutedAlpha, 1e-6f);
+    EXPECT_LT(resting, active);
+}
+
+TEST(BadgeTreatmentTest, RankBadgeStaysSlightlyAboveStatusRowDuringFades)
+{
+    constexpr float kStatusOpacity = 0.92f;
+    constexpr float kRankOpacity = 0.95f;
+
+    const float statusFull = ResolveBadgeAlpha(1.0f, 1.0f, kStatusOpacity, false, 1.0f);
+    const float rankFull = ResolveTierEmblemAlpha(1.0f, 1.0f, kRankOpacity);
+    EXPECT_FLOAT_EQ(statusFull, 0.92f);
+    EXPECT_FLOAT_EQ(rankFull, 0.95f);
+    EXPECT_GT(rankFull, statusFull);
+
+    const float statusFading = ResolveBadgeAlpha(0.42f, 0.65f, kStatusOpacity, false, 1.0f);
+    const float rankFading = ResolveTierEmblemAlpha(0.42f, 0.65f, kRankOpacity);
+    EXPECT_GT(rankFading, statusFading);
 }
 
 // ============================================================================
@@ -1706,4 +1831,86 @@ TEST(IconOpacityFloor, LiftsSecondaryKeepsPrimary)
     EXPECT_NEAR(SecondaryOpacityFloor(1.00f), 1.00f, 1e-6f);  // primary untouched
     EXPECT_NEAR(SecondaryOpacityFloor(0.80f), 0.80f, 1e-6f);  // at floor unchanged
     EXPECT_NEAR(SecondaryOpacityFloor(0.90f), 0.90f, 1e-6f);  // above floor unchanged
+}
+
+// ============================================================================
+// Long-name fitting -- production width-driven fit from NameFit.hpp
+// ============================================================================
+
+TEST(NameFit, OrdinaryNamesKeepAuthoredTypography)
+{
+    const auto fit = Renderer::NameFit::Compute(Renderer::NameFit::MAX_WIDTH_EM * 100.0f, 100.0f);
+    EXPECT_FLOAT_EQ(fit.fontScale, 1.0f);
+    EXPECT_FLOAT_EQ(fit.horizontalScale, 1.0f);
+}
+
+TEST(NameFit, LongNamesUseBothGentleReductions)
+{
+    constexpr float fontSize = 100.0f;
+    constexpr float measuredWidth = 7.5f * fontSize;
+    const auto fit = Renderer::NameFit::Compute(measuredWidth, fontSize);
+
+    EXPECT_LT(fit.fontScale, 1.0f);
+    EXPECT_GT(fit.fontScale, Renderer::NameFit::MIN_FONT_SCALE);
+    EXPECT_LT(fit.horizontalScale, 1.0f);
+    EXPECT_GT(fit.horizontalScale, Renderer::NameFit::MIN_HORIZONTAL_SCALE);
+    EXPECT_NEAR(measuredWidth * fit.fontScale * fit.horizontalScale,
+                Renderer::NameFit::MAX_WIDTH_EM * fontSize,
+                1e-3f);
+}
+
+TEST(NameFit, FitIsStableAcrossDistanceScaling)
+{
+    const auto nearFit = Renderer::NameFit::Compute(760.0f, 100.0f);
+    const auto farFit = Renderer::NameFit::Compute(190.0f, 25.0f);
+
+    EXPECT_NEAR(nearFit.fontScale, farFit.fontScale, 1e-6f);
+    EXPECT_NEAR(nearFit.horizontalScale, farFit.horizontalScale, 1e-6f);
+}
+
+TEST(NameFit, ExtremeNamesRespectLegibilityFloors)
+{
+    const auto fit = Renderer::NameFit::Compute(2000.0f, 100.0f);
+    EXPECT_FLOAT_EQ(fit.fontScale, Renderer::NameFit::MIN_FONT_SCALE);
+    EXPECT_FLOAT_EQ(fit.horizontalScale, Renderer::NameFit::MIN_HORIZONTAL_SCALE);
+}
+
+TEST(NameFit, InvalidMeasurementsAreSafeNoOps)
+{
+    const auto zeroWidth = Renderer::NameFit::Compute(.0f, 100.0f);
+    const auto zeroFont = Renderer::NameFit::Compute(100.0f, .0f);
+    EXPECT_FLOAT_EQ(zeroWidth.fontScale, 1.0f);
+    EXPECT_FLOAT_EQ(zeroWidth.horizontalScale, 1.0f);
+    EXPECT_FLOAT_EQ(zeroFont.fontScale, 1.0f);
+    EXPECT_FLOAT_EQ(zeroFont.horizontalScale, 1.0f);
+}
+
+// ============================================================================
+// Configurable actor processing limits
+// ============================================================================
+
+TEST(ActorLimits, DefaultsRemainTheFormerCompileTimeLimits)
+{
+    const auto limits = RenderConstants::ClampActorLimits(RenderConstants::DEFAULT_MAX_PLATES,
+                                                          RenderConstants::DEFAULT_MAX_SCAN_ACTORS);
+    EXPECT_EQ(limits.maxPlates, 16);
+    EXPECT_EQ(limits.maxScanActors, 128);
+}
+
+TEST(ActorLimits, ValuesAreClampedToSafetyBounds)
+{
+    const auto low = RenderConstants::ClampActorLimits(-10, -20);
+    EXPECT_EQ(low.maxPlates, RenderConstants::MIN_PLATES);
+    EXPECT_EQ(low.maxScanActors, RenderConstants::MIN_SCAN_ACTORS);
+
+    const auto high = RenderConstants::ClampActorLimits(10000, 20000);
+    EXPECT_EQ(high.maxPlates, RenderConstants::MAX_PLATES);
+    EXPECT_EQ(high.maxScanActors, RenderConstants::MAX_SCAN_ACTORS);
+}
+
+TEST(ActorLimits, ScanLimitCanAlwaysFillPlateBudget)
+{
+    const auto limits = RenderConstants::ClampActorLimits(64, 8);
+    EXPECT_EQ(limits.maxPlates, 64);
+    EXPECT_EQ(limits.maxScanActors, 64);
 }
