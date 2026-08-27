@@ -1,9 +1,13 @@
-/**
- * Unit tests for glyph settings parsing using Google Test.
- *
- * Tests INI parsing logic including tier definitions, color parsing,
- * effect type parsing, and format string handling.
- */
+// Unit tests for glyph settings parsing using Google Test.
+//
+// Tests INI parsing logic: tier definitions, color parsing, effect type
+// parsing, and format string handling.
+//
+// The harness links no game code, so the parsing helpers below MIRROR
+// src/Settings.cpp instead of calling it. A mirror goes stale silently, so
+// change the copy here in the same edit that changes the production parser.
+
+#include "../src/Settings.hpp"
 
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -812,6 +816,299 @@ TEST(FocusSettings, BoolParseFalseVariants)
     EXPECT_FALSE(focus_test::ParseBool("anything-else"));
 }
 
+TEST(DisplaySettings, ActorLimitDefaultsMatchRenderDefaults)
+{
+    const Settings::DisplaySettings display;
+    EXPECT_EQ(display.MaxPlates, RenderConstants::DEFAULT_MAX_PLATES);
+    EXPECT_EQ(display.MaxScanActors, RenderConstants::DEFAULT_MAX_SCAN_ACTORS);
+}
+
+// ============================================================================
+// Graffito world-plane text settings
+// ============================================================================
+//
+// The settings value type is production code. The clamp helper mirrors the
+// validation rules registered in Settings.cpp's kSettings binding table; the
+// production plugin itself is not linked into this lightweight test executable.
+
+namespace graffito_test
+{
+
+static void ClampGraffito(Settings::GraffitoSettings& g)
+{
+    g.Scale = std::clamp(g.Scale, 0.25f, 4.0f);
+    g.PlayerScale = std::clamp(g.PlayerScale, 0.25f, 2.0f);
+    g.ForwardOffset = std::clamp(g.ForwardOffset, 0.0f, 32.0f);
+    g.FacingFadeDegrees = std::clamp(g.FacingFadeDegrees, 0.0f, 45.0f);
+    g.BacksideBleedAlpha = std::clamp(g.BacksideBleedAlpha, 0.0f, 0.25f);
+    g.EdgeSeamAlpha = std::clamp(g.EdgeSeamAlpha, 0.0f, 0.4f);
+    g.FolioReverseAlpha = std::clamp(g.FolioReverseAlpha, 0.0f, 1.0f);
+    g.FolioSpineAlpha = std::clamp(g.FolioSpineAlpha, 0.0f, 1.0f);
+    g.FolioDepth = std::clamp(g.FolioDepth, 0.0f, 28.0f);
+    g.WrapDegrees = std::clamp(g.WrapDegrees, 0.0f, 140.0f);
+    g.FisheyeStrength = std::clamp(g.FisheyeStrength, 0.0f, 1.0f);
+    g.LayerDepth = std::clamp(g.LayerDepth, 0.0f, 0.06f);
+    g.EdgeSheen = std::clamp(g.EdgeSheen, 0.0f, 0.4f);
+    g.OrientationSettleTime = std::clamp(g.OrientationSettleTime, 0.0f, 2.0f);
+    g.MaxDistance = std::max(g.MaxDistance, 0.0f);
+    g.EpitaphGroundLift = std::clamp(g.EpitaphGroundLift, 0.0f, 16.0f);
+}
+
+}  // namespace graffito_test
+
+TEST(GraffitoSettings, DefaultsMatchProduction)
+{
+    Settings::GraffitoSettings g;
+    EXPECT_FALSE(g.Enabled);
+    EXPECT_FLOAT_EQ(g.Scale, 1.0f);
+    EXPECT_FLOAT_EQ(g.PlayerScale, 0.72f);
+    EXPECT_FLOAT_EQ(g.ForwardOffset, 4.0f);
+    EXPECT_FLOAT_EQ(g.FacingFadeDegrees, 15.0f);
+    EXPECT_FLOAT_EQ(g.BacksideBleedAlpha, 0.12f);
+    EXPECT_FLOAT_EQ(g.EdgeSeamAlpha, 0.22f);
+    EXPECT_TRUE(g.FolioEnabled);
+    EXPECT_FLOAT_EQ(g.FolioReverseAlpha, 0.72f);
+    EXPECT_FLOAT_EQ(g.FolioSpineAlpha, 0.88f);
+    EXPECT_FLOAT_EQ(g.FolioDepth, 2.0f);
+    EXPECT_FLOAT_EQ(g.WrapDegrees, 55.0f);
+    EXPECT_FLOAT_EQ(g.FisheyeStrength, 0.62f);
+    EXPECT_FLOAT_EQ(g.LayerDepth, 0.0f);
+    EXPECT_FLOAT_EQ(g.EdgeSheen, 0.14f);
+    EXPECT_FLOAT_EQ(g.OrientationSettleTime, 0.18f);
+    EXPECT_FLOAT_EQ(g.MaxDistance, 1200.0f);
+    EXPECT_TRUE(g.FallenEpitaphEnabled);
+    EXPECT_FLOAT_EQ(g.EpitaphGroundLift, 2.0f);
+}
+
+TEST(GraffitoSettings, ClampScaleRange)
+{
+    Settings::GraffitoSettings g;
+    g.Scale = 0.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.Scale, 0.25f);
+    g.Scale = 12.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.Scale, 4.0f);
+}
+
+TEST(GraffitoSettings, ClampPlayerScaleRange)
+{
+    Settings::GraffitoSettings g;
+    g.PlayerScale = 0.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.PlayerScale, 0.25f);
+    g.PlayerScale = 4.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.PlayerScale, 2.0f);
+}
+
+TEST(GraffitoSettings, ClampForwardOffsetRange)
+{
+    Settings::GraffitoSettings g;
+    g.ForwardOffset = -1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.ForwardOffset, 0.0f);
+    g.ForwardOffset = 64.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.ForwardOffset, 32.0f);
+}
+
+TEST(GraffitoSettings, ClampFacingFadeDegreesRange)
+{
+    Settings::GraffitoSettings g;
+    g.FacingFadeDegrees = -5.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FacingFadeDegrees, 0.0f);
+    g.FacingFadeDegrees = 90.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FacingFadeDegrees, 45.0f);
+}
+
+TEST(GraffitoSettings, FacingFadeZeroAllowsHardTransition)
+{
+    Settings::GraffitoSettings g;
+    g.FacingFadeDegrees = 0.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FacingFadeDegrees, 0.0f);
+}
+
+TEST(GraffitoSettings, ClampReverseInkAlphaRanges)
+{
+    Settings::GraffitoSettings g;
+    g.BacksideBleedAlpha = -1.0f;
+    g.EdgeSeamAlpha = 2.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.BacksideBleedAlpha, 0.0f);
+    EXPECT_FLOAT_EQ(g.EdgeSeamAlpha, 0.4f);
+
+    g.BacksideBleedAlpha = 1.0f;
+    g.EdgeSeamAlpha = -1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.BacksideBleedAlpha, 0.25f);
+    EXPECT_FLOAT_EQ(g.EdgeSeamAlpha, 0.0f);
+}
+
+TEST(GraffitoSettings, ClampFolioAlphaRanges)
+{
+    Settings::GraffitoSettings g;
+    g.FolioReverseAlpha = -1.0f;
+    g.FolioSpineAlpha = 2.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FolioReverseAlpha, 0.0f);
+    EXPECT_FLOAT_EQ(g.FolioSpineAlpha, 1.0f);
+
+    g.FolioReverseAlpha = 2.0f;
+    g.FolioSpineAlpha = -1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FolioReverseAlpha, 1.0f);
+    EXPECT_FLOAT_EQ(g.FolioSpineAlpha, 0.0f);
+}
+
+TEST(GraffitoSettings, FolioDepthAllowsZeroAndClampsRange)
+{
+    Settings::GraffitoSettings g;
+    g.FolioDepth = -1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FolioDepth, 0.0f);
+
+    g.FolioDepth = 0.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FolioDepth, 0.0f);
+
+    g.FolioDepth = 2.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FolioDepth, 2.0f);
+
+    g.FolioDepth = 100.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.FolioDepth, 28.0f);
+}
+
+TEST(GraffitoSettings, ClampDimensionalFrontRanges)
+{
+    Settings::GraffitoSettings g;
+    g.WrapDegrees = -1.0f;
+    g.FisheyeStrength = -1.0f;
+    g.LayerDepth = 1.0f;
+    g.EdgeSheen = -1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.WrapDegrees, 0.0f);
+    EXPECT_FLOAT_EQ(g.FisheyeStrength, 0.0f);
+    EXPECT_FLOAT_EQ(g.LayerDepth, 0.06f);
+    EXPECT_FLOAT_EQ(g.EdgeSheen, 0.0f);
+
+    g.WrapDegrees = 180.0f;
+    g.FisheyeStrength = 2.0f;
+    g.LayerDepth = -1.0f;
+    g.EdgeSheen = 1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.WrapDegrees, 140.0f);
+    EXPECT_FLOAT_EQ(g.FisheyeStrength, 1.0f);
+    EXPECT_FLOAT_EQ(g.LayerDepth, 0.0f);
+    EXPECT_FLOAT_EQ(g.EdgeSheen, 0.4f);
+}
+
+TEST(GraffitoSettings, FolioCanBeDisabledWithoutChangingSingleSheetControls)
+{
+    Settings::GraffitoSettings g;
+    g.FolioEnabled = false;
+    g.BacksideBleedAlpha = 0.08f;
+    g.EdgeSeamAlpha = 0.30f;
+    graffito_test::ClampGraffito(g);
+
+    EXPECT_FALSE(g.FolioEnabled);
+    EXPECT_FLOAT_EQ(g.BacksideBleedAlpha, 0.08f);
+    EXPECT_FLOAT_EQ(g.EdgeSeamAlpha, 0.30f);
+}
+
+TEST(GraffitoSettings, ClampOrientationSettleTimeRange)
+{
+    Settings::GraffitoSettings g;
+    g.OrientationSettleTime = -1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.OrientationSettleTime, 0.0f);
+    g.OrientationSettleTime = 5.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.OrientationSettleTime, 2.0f);
+}
+
+TEST(GraffitoSettings, OrientationSettleTimeZeroIsInstant)
+{
+    Settings::GraffitoSettings g;
+    g.OrientationSettleTime = 0.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.OrientationSettleTime, 0.0f);
+}
+
+TEST(GraffitoSettings, MaxDistanceZeroIsSentinel)
+{
+    Settings::GraffitoSettings g;
+    g.MaxDistance = 0.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.MaxDistance, 0.0f);
+}
+
+TEST(GraffitoSettings, MaxDistanceNegativeClampedToZero)
+{
+    Settings::GraffitoSettings g;
+    g.MaxDistance = -100.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.MaxDistance, 0.0f);
+}
+
+TEST(GraffitoSettings, ClampEpitaphGroundLiftRange)
+{
+    Settings::GraffitoSettings g;
+    g.EpitaphGroundLift = -1.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.EpitaphGroundLift, 0.0f);
+    g.EpitaphGroundLift = 50.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.EpitaphGroundLift, 16.0f);
+}
+
+TEST(GraffitoSettings, InRangeValuesPreserved)
+{
+    Settings::GraffitoSettings g;
+    g.Scale = 1.5f;
+    g.PlayerScale = 0.8f;
+    g.ForwardOffset = 8.0f;
+    g.FacingFadeDegrees = 20.0f;
+    g.BacksideBleedAlpha = 0.08f;
+    g.EdgeSeamAlpha = 0.3f;
+    g.FolioEnabled = false;
+    g.FolioReverseAlpha = 0.42f;
+    g.FolioSpineAlpha = 0.65f;
+    g.FolioDepth = 0.32f;
+    g.WrapDegrees = 112.0f;
+    g.FisheyeStrength = 0.65f;
+    g.LayerDepth = 0.05f;
+    g.EdgeSheen = 0.2f;
+    g.OrientationSettleTime = 0.3f;
+    g.MaxDistance = 900.0f;
+    g.FallenEpitaphEnabled = false;
+    g.EpitaphGroundLift = 4.0f;
+    graffito_test::ClampGraffito(g);
+    EXPECT_FLOAT_EQ(g.Scale, 1.5f);
+    EXPECT_FLOAT_EQ(g.PlayerScale, 0.8f);
+    EXPECT_FLOAT_EQ(g.ForwardOffset, 8.0f);
+    EXPECT_FLOAT_EQ(g.FacingFadeDegrees, 20.0f);
+    EXPECT_FLOAT_EQ(g.BacksideBleedAlpha, 0.08f);
+    EXPECT_FLOAT_EQ(g.EdgeSeamAlpha, 0.3f);
+    EXPECT_FALSE(g.FolioEnabled);
+    EXPECT_FLOAT_EQ(g.FolioReverseAlpha, 0.42f);
+    EXPECT_FLOAT_EQ(g.FolioSpineAlpha, 0.65f);
+    EXPECT_FLOAT_EQ(g.FolioDepth, 0.32f);
+    EXPECT_FLOAT_EQ(g.WrapDegrees, 112.0f);
+    EXPECT_FLOAT_EQ(g.FisheyeStrength, 0.65f);
+    EXPECT_FLOAT_EQ(g.LayerDepth, 0.05f);
+    EXPECT_FLOAT_EQ(g.EdgeSheen, 0.2f);
+    EXPECT_FLOAT_EQ(g.OrientationSettleTime, 0.3f);
+    EXPECT_FLOAT_EQ(g.MaxDistance, 900.0f);
+    EXPECT_FALSE(g.FallenEpitaphEnabled);
+    EXPECT_FLOAT_EQ(g.EpitaphGroundLift, 4.0f);
+}
+
 // ============================================================================
 // Soft directional drop-shadow settings
 // ============================================================================
@@ -1465,10 +1762,25 @@ static float ClampRangeIcon(float v, float lo, float hi)
 
 TEST(IconOpacity, ParsesAndClampsToRange)
 {
-    EXPECT_NEAR(ClampRangeIcon(ParseFloat("1.15", 1.15f), 0.5f, 2.0f), 1.15f, 1e-6f);
-    EXPECT_NEAR(ClampRangeIcon(ParseFloat("5.0", 1.15f), 0.5f, 2.0f), 2.0f, 1e-6f);   // over max
-    EXPECT_NEAR(ClampRangeIcon(ParseFloat("0.1", 1.15f), 0.5f, 2.0f), 0.5f, 1e-6f);   // under min
-    EXPECT_NEAR(ClampRangeIcon(ParseFloat("bad", 1.15f), 0.5f, 2.0f), 1.15f, 1e-6f);  // default
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("0.92", 0.92f), 0.5f, 2.0f), 0.92f, 1e-6f);
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("5.0", 0.92f), 0.5f, 2.0f), 2.0f, 1e-6f);   // over max
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("0.1", 0.92f), 0.5f, 2.0f), 0.5f, 1e-6f);   // under min
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("bad", 0.92f), 0.5f, 2.0f), 0.92f, 1e-6f);  // default
+}
+
+TEST(EmblemCrispAlpha, DefaultsToSlightlyHigherOpacityAndClampsToRange)
+{
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("bad", 0.95f), 0.5f, 1.0f), 0.95f, 1e-6f);
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("0.4", 0.95f), 0.5f, 1.0f), 0.5f, 1e-6f);
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("1.2", 0.95f), 0.5f, 1.0f), 1.0f, 1e-6f);
+}
+
+TEST(IconMutedAlpha, DefaultsToFullOpacityAndClampsToRange)
+{
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("bad", 1.0f), 0.0f, 1.0f), 1.0f, 1e-6f);
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("0.35", 1.0f), 0.0f, 1.0f), 0.35f, 1e-6f);
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("2.0", 1.0f), 0.0f, 1.0f), 1.0f, 1e-6f);
+    EXPECT_NEAR(ClampRangeIcon(ParseFloat("-0.2", 1.0f), 0.0f, 1.0f), 0.0f, 1e-6f);
 }
 
 // Mirror of RendererEffects.cpp ParticleTypeWeight (per repo test convention).
@@ -1640,4 +1952,66 @@ TEST(HorizontalOffset, ClampsExtremeConfiguration)
 {
     EXPECT_FLOAT_EQ(ResolveHorizontalOffset(-500.0f, 1.0f), -200.0f);
     EXPECT_FLOAT_EQ(ResolveHorizontalOffset(500.0f, 1.0f), 200.0f);
+}
+
+// Mirrors the Deck bindings in Settings.cpp. These bounds protect the
+// offscreen allocation while still allowing portrait and social-media sizes.
+static void ClampDeck(Settings::DeckSettings& deck)
+{
+    deck.CardWidth = std::clamp(deck.CardWidth, 384, 2048);
+    deck.CardHeight = std::clamp(deck.CardHeight, 538, 2867);
+    deck.TargetRadius = std::clamp(deck.TargetRadius, 32, 1000);
+}
+
+TEST(DeckSettings, DefaultsMatchProduction)
+{
+    const Settings::DeckSettings deck;
+    EXPECT_TRUE(deck.Enabled);
+    EXPECT_EQ(deck.Key, 119);
+    EXPECT_EQ(deck.OutputFolder, "Data/SKSE/Plugins/glyph/cards");
+    EXPECT_EQ(deck.CardWidth, 750);
+    EXPECT_EQ(deck.CardHeight, 1050);
+    EXPECT_EQ(deck.TargetRadius, 220);
+    EXPECT_TRUE(deck.PlayerFallback);
+    EXPECT_TRUE(deck.RarityRolls);
+}
+
+TEST(DeckSettings, ClampsOutputDimensions)
+{
+    Settings::DeckSettings deck;
+    deck.CardWidth = 1;
+    deck.CardHeight = 1;
+    ClampDeck(deck);
+    EXPECT_EQ(deck.CardWidth, 384);
+    EXPECT_EQ(deck.CardHeight, 538);
+
+    deck.CardWidth = 9999;
+    deck.CardHeight = 9999;
+    ClampDeck(deck);
+    EXPECT_EQ(deck.CardWidth, 2048);
+    EXPECT_EQ(deck.CardHeight, 2867);
+}
+
+TEST(DeckSettings, ClampsTargetRadius)
+{
+    Settings::DeckSettings deck;
+    deck.TargetRadius = -10;
+    ClampDeck(deck);
+    EXPECT_EQ(deck.TargetRadius, 32);
+
+    deck.TargetRadius = 5000;
+    ClampDeck(deck);
+    EXPECT_EQ(deck.TargetRadius, 1000);
+}
+
+TEST(DeckSettings, PreservesValidValues)
+{
+    Settings::DeckSettings deck;
+    deck.CardWidth = 1200;
+    deck.CardHeight = 1600;
+    deck.TargetRadius = 360;
+    ClampDeck(deck);
+    EXPECT_EQ(deck.CardWidth, 1200);
+    EXPECT_EQ(deck.CardHeight, 1600);
+    EXPECT_EQ(deck.TargetRadius, 360);
 }
