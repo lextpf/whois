@@ -25,6 +25,12 @@ set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 # Enable Xbyak support for SKSE, needed for hook_function_prologue
 set(SKSE_SUPPORT_XBYAK ON CACHE BOOL "" FORCE)
 
+# Build one Address Library-backed DLL for Skyrim SE 1.5.x and AE 1.6.x
+# (including GOG). Skyrim VR is intentionally unsupported.
+set(ENABLE_SKYRIM_SE ON CACHE BOOL "Enable Skyrim SE runtime support" FORCE)
+set(ENABLE_SKYRIM_AE ON CACHE BOOL "Enable Skyrim AE/GOG runtime support" FORCE)
+set(ENABLE_SKYRIM_VR OFF CACHE BOOL "Enable Skyrim VR runtime support" FORCE)
+
 # Fetch CommonLibSSE-NG
 include(FetchContent)
 FetchContent_Declare(
@@ -134,10 +140,20 @@ add_library(glyph SHARED
     src/DebugOverlay.hpp
     src/DebugOverlay.cpp
     src/RenderConstants.hpp
+    src/RasterQuality.hpp
+    src/RenderSampling.hpp
+    src/RenderSampling.cpp
+    src/NameFit.hpp
     src/ParticleTextures.hpp
     src/ParticleTextures.cpp
     src/BadgeTextures.hpp
     src/BadgeTextures.cpp
+    src/DeckUtils.hpp
+    src/DeckUtils.cpp
+    src/DeckPng.hpp
+    src/DeckPng.cpp
+    src/Deck.hpp
+    src/Deck.cpp
     src/ProjectManifest.hpp
     src/ProjectManifest.cpp
     src/TextPostProcess.hpp
@@ -146,6 +162,10 @@ add_library(glyph SHARED
     src/SceneMeter.cpp
     src/DepthClip.hpp
     src/DepthClip.cpp
+    src/GraffitoMath.hpp
+    src/GraffitoShaderContract.hpp
+    src/Graffito.hpp
+    src/Graffito.cpp
     src/TrueHUDAPI.h
     src/HudCompat.hpp
     src/HudCompat.cpp
@@ -173,11 +193,6 @@ if(SRELL_INCLUDE_DIRS)
     target_include_directories(glyph PRIVATE ${SRELL_INCLUDE_DIRS})
 endif()
 
-# Define Skyrim version (1.5.97 SE)
-target_compile_definitions(glyph PRIVATE
-    SKYRIM_SE
-)
-
 target_link_libraries(glyph PRIVATE
     CommonLibSSE
     imgui::imgui
@@ -186,6 +201,8 @@ target_link_libraries(glyph PRIVATE
     NanoSVG::nanosvg
     NanoSVG::nanosvgrast
     nlohmann_json::nlohmann_json
+    ole32
+    windowscodecs
 )
 # Note: boost-unordered and srell are header-only, no linking needed
 
@@ -199,6 +216,7 @@ if(BUILD_GLYPH_TESTS)
 
     # Test executable for utility functions
     add_executable(glyph_test_utils tests/test_utils.cpp)
+    target_include_directories(glyph_test_utils PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_features(glyph_test_utils PRIVATE cxx_std_17)
     target_link_libraries(glyph_test_utils PRIVATE GTest::gtest GTest::gtest_main)
     if(MSVC)
@@ -221,10 +239,35 @@ if(BUILD_GLYPH_TESTS)
         target_compile_options(glyph_test_label_format PRIVATE /W4)
     endif()
 
+    # Test executable for Graffito's runtime-independent plane math
+    add_executable(glyph_test_graffito tests/test_graffito.cpp)
+    target_include_directories(glyph_test_graffito PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(glyph_test_graffito PRIVATE cxx_std_17)
+    target_link_libraries(glyph_test_graffito PRIVATE GTest::gtest GTest::gtest_main)
+    if(MSVC)
+        target_compile_options(glyph_test_graffito PRIVATE /W4)
+    endif()
+
+    # Test executable for runtime-independent card helpers
+    add_executable(glyph_test_deck tests/test_deck.cpp src/DeckUtils.cpp src/DeckPng.cpp)
+    target_include_directories(glyph_test_deck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(glyph_test_deck PRIVATE cxx_std_23)
+    target_link_libraries(glyph_test_deck PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+        ole32
+        windowscodecs
+    )
+    if(MSVC)
+        target_compile_options(glyph_test_deck PRIVATE /W4)
+    endif()
+
     # Enable CTest integration with Google Test
     include(GoogleTest)
     enable_testing()
     gtest_discover_tests(glyph_test_utils)
     gtest_discover_tests(glyph_test_settings)
     gtest_discover_tests(glyph_test_label_format)
+    gtest_discover_tests(glyph_test_graffito)
+    gtest_discover_tests(glyph_test_deck)
 endif()
