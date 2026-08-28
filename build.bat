@@ -9,8 +9,47 @@ REM   3. clang-tidy   - static analysis via Ninja compile_commands.json sidecar 
 REM   4. build        - release build of the Release configuration via cmake --build
 REM   5. doxide       - API documentation generation via doxide + mkdocs build
 REM ===========================================================================================
+REM Options:
+REM   --skip-tidy     skip step 3 (clang-tidy static analysis)
+REM   --help          print usage and exit
+REM ===========================================================================================
 
 setlocal enabledelayedexpansion
+
+REM ============================================================================
+REM Parse command line options
+REM ============================================================================
+set SKIP_TIDY=0
+
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--skip-tidy" (
+    set SKIP_TIDY=1
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--help" (
+    set USAGE_RC=0
+    goto usage
+)
+if /i "%~1"=="-h" (
+    set USAGE_RC=0
+    goto usage
+)
+echo ERROR: unknown option "%~1"
+set USAGE_RC=1
+goto usage
+
+:usage
+echo.
+echo Usage: build.bat [--skip-tidy] [--help]
+echo.
+echo   --skip-tidy    Skip the clang-tidy static analysis step
+echo   --help, -h     Show this message
+echo.
+exit /b !USAGE_RC!
+
+:args_done
 
 echo ============================================================================
 echo                             GLYPH BUILD PIPELINE
@@ -51,6 +90,11 @@ REM STEP 3: Run clang-tidy
 REM ============================================================================
 echo [3/5] Running clang-tidy...
 echo ----------------------------------------------------------------------------
+
+if !SKIP_TIDY!==1 (
+    echo SKIP: clang-tidy disabled by --skip-tidy
+    goto tidy_done
+)
 
 where clang-tidy >nul 2>&1
 if errorlevel 1 (
@@ -114,6 +158,7 @@ if errorlevel 1 (
     )
     echo clang-tidy complete.
 )
+:tidy_done
 echo.
 
 REM ============================================================================
