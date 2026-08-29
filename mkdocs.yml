@@ -71,83 +71,218 @@ nav:
   - API Reference:
     - Core:
       - Core/index.md
-      - ConsoleCommands: ConsoleCommands/index.md
+      - SettingEntry: Core/SettingEntry.md
+      - ConsoleCommands:
+        - Core/ConsoleCommands/index.md
 
     - Rendering:
       - Rendering/index.md
-      - Renderer:
-        - Renderer/index.md
-        - ActorCache: Renderer/ActorCache.md
-        - ActorDrawData: Renderer/ActorDrawData.md
-        - Disposition: Renderer/Disposition.md
-        - DistanceFactors: Renderer/DistanceFactors.md
-        - LabelLayout: Renderer/LabelLayout.md
-        - LabelStyle: Renderer/LabelStyle.md
-        - OcclusionCacheEntry: Renderer/OcclusionCacheEntry.md
-        - OrnamentMetrics: Renderer/OrnamentMetrics.md
-        - RendererState: Renderer/RendererState.md
-        - RenderSeg: Renderer/RenderSeg.md
-        - RenderSettingsSnapshot: Renderer/RenderSettingsSnapshot.md
-        - SnapshotState: Renderer/SnapshotState.md
-      - TextEffects:
-        - TextEffects/index.md
-        - DualOutlineParams: TextEffects/DualOutlineParams.md
-        - OutlineGlowParams: TextEffects/OutlineGlowParams.md
-        - ParticleAuraParams: TextEffects/ParticleAuraParams.md
-        - ShineParams: TextEffects/ShineParams.md
-        - TextVertexSetup: TextEffects/TextVertexSetup.md
-        - WaveParams: TextEffects/WaveParams.md
-      - Occlusion:
-        - Occlusion/index.md
-        - Constants: Occlusion/Constants/index.md
-      - RenderConstants: RenderConstants/index.md
-      - ParticleTextures:
-        - ParticleTextures/index.md
-        - BlendMode: ParticleTextures/BlendMode.md
+      - BadgeTextures:
+        - Rendering/BadgeTextures/index.md
       - DebugOverlay:
-        - DebugOverlay/index.md
-        - Context: DebugOverlay/Context.md
-        - Stats: DebugOverlay/Stats.md
-      - TextPostProcess: TextPostProcess/index.md
+        - Rendering/DebugOverlay/index.md
+      - Occlusion:
+        - Rendering/Occlusion/index.md
+      - ParticleTextures:
+        - Rendering/ParticleTextures/index.md
+      - RenderConstants:
+        - Rendering/RenderConstants/index.md
+        - ActorLimits: Rendering/RenderConstants/ActorLimits.md
+      - Renderer:
+        - Rendering/Renderer/index.md
+        - ActorCache: Rendering/Renderer/ActorCache.md
+        - ActorDrawData: Rendering/Renderer/ActorDrawData.md
+        - ActorLabelContext: Rendering/Renderer/ActorLabelContext.md
+        - BadgeComposition: Rendering/Renderer/BadgeComposition.md
+        - BadgeDrawItem: Rendering/Renderer/BadgeDrawItem.md
+        - ComposedBadgeSlot: Rendering/Renderer/ComposedBadgeSlot.md
+        - CreatureKind: Rendering/Renderer/CreatureKind.md
+        - DistanceFactors: Rendering/Renderer/DistanceFactors.md
+        - EngagementKind: Rendering/Renderer/EngagementKind.md
+        - LabelLayout: Rendering/Renderer/LabelLayout.md
+        - LabelStyle: Rendering/Renderer/LabelStyle.md
+        - LevelDelta: Rendering/Renderer/LevelDelta.md
+        - OcclusionCacheEntry: Rendering/Renderer/OcclusionCacheEntry.md
+        - ProtectionKind: Rendering/Renderer/ProtectionKind.md
+        - RelationshipKind: Rendering/Renderer/RelationshipKind.md
+        - RenderSeg: Rendering/Renderer/RenderSeg.md
+        - RenderSettingsSnapshot: Rendering/Renderer/RenderSettingsSnapshot.md
+        - RendererState: Rendering/Renderer/RendererState.md
+        - RoleKind: Rendering/Renderer/RoleKind.md
+        - SnapshotState: Rendering/Renderer/SnapshotState.md
+        - SneakKind: Rendering/Renderer/SneakKind.md
+        - RenderSettingsSnapshot:
+          - IconTokens: Rendering/Renderer/RenderSettingsSnapshot/IconTokens.md
+          - LabelTokens: Rendering/Renderer/RenderSettingsSnapshot/LabelTokens.md
+          - NpcColors: Rendering/Renderer/RenderSettingsSnapshot/NpcColors.md
+      - TextEffects:
+        - Rendering/TextEffects/index.md
+      - TextPostProcess:
+        - Rendering/TextPostProcess/index.md
 
     - Configuration:
       - Configuration/index.md
       - Settings:
-        - Settings/index.md
-        - AnimColorSettings: Settings/AnimColorSettings.md
-        - Color3: Settings/Color3.md
-        - DisplaySettings: Settings/DisplaySettings.md
-        - DistanceSettings: Settings/DistanceSettings.md
-        - EffectParams: Settings/EffectParams.md
-        - EffectType: Settings/EffectType.md
-        - FontSettings: Settings/FontSettings.md
-        - GlowSettings: Settings/GlowSettings.md
-        - OcclusionSettings: Settings/OcclusionSettings.md
-        - OrnamentSettings: Settings/OrnamentSettings.md
-        - ParticleSettings: Settings/ParticleSettings.md
-        - ParticleStyle: Settings/ParticleStyle.md
-        - Segment: Settings/Segment.md
-        - SettingEntry: Settings/SettingEntry.md
-        - ShadowOutlineSettings: Settings/ShadowOutlineSettings.md
-        - ShineSettings: Settings/ShineSettings.md
-        - SpecialTitleDefinition: Settings/SpecialTitleDefinition.md
-        - TierDefinition: Settings/TierDefinition.md
-        - TransitionSettings: Settings/TransitionSettings.md
-        - TypewriterSettings: Settings/TypewriterSettings.md
-        - VisualSettings: Settings/VisualSettings.md
-        - overloaded: Settings/overloaded.md
+        - Configuration/Settings/index.md
+        - CandlelightSettings: Configuration/Settings/CandlelightSettings.md
+        - Color3: Configuration/Settings/Color3.md
+        - DeathRiteSettings: Configuration/Settings/DeathRiteSettings.md
+        - DepthClipSettings: Configuration/Settings/DepthClipSettings.md
+        - EffectParams: Configuration/Settings/EffectParams.md
+        - EffectType: Configuration/Settings/EffectType.md
+        - FocusSettings: Configuration/Settings/FocusSettings.md
+        - GraffitoSettings: Configuration/Settings/GraffitoSettings.md
+        - IconSettings: Configuration/Settings/IconSettings.md
+        - LabelSettings: Configuration/Settings/LabelSettings.md
+        - NpcColorSettings: Configuration/Settings/NpcColorSettings.md
+        - ParticleStyle: Configuration/Settings/ParticleStyle.md
+        - QuietSettings: Configuration/Settings/QuietSettings.md
+        - Segment: Configuration/Settings/Segment.md
+        - TierDefinition: Configuration/Settings/TierDefinition.md
 
     - Hooks:
       - Hooks/index.md
 
     - Utilities:
       - Utilities/index.md
-      - GameState: GameState/index.md
-      - Utf8Utils: Utf8Utils/index.md
 
-    - Namespaces:
-      - Stl:
-        - Stl/index.md
-        - EnumStringMap: Stl/EnumStringMap.md
-        - "EnumStringMap::Entry": Stl/EnumStringMap/Entry.md
-      - "RE (extensions)": RE/index.md
+    - BadgeTextures:
+      - BadgeTextures/index.md
+
+    - ConsoleCommands:
+      - ConsoleCommands/index.md
+
+    - DebugOverlay:
+      - DebugOverlay/index.md
+      - Context: DebugOverlay/Context.md
+      - Stats: DebugOverlay/Stats.md
+
+    - Deck:
+      - Deck/index.md
+      - ActorRarityProfile: Deck/ActorRarityProfile.md
+      - CardBadge: Deck/CardBadge.md
+      - CardRequest: Deck/CardRequest.md
+      - PortraitCrop: Deck/PortraitCrop.md
+      - PortraitUV: Deck/PortraitUV.md
+      - Rarity: Deck/Rarity.md
+      - RarityArchetype: Deck/RarityArchetype.md
+
+    - DepthClip:
+      - DepthClip/index.md
+
+    - GameState:
+      - GameState/index.md
+
+    - Graffito:
+      - Graffito/index.md
+      - CylinderWrap: Graffito/CylinderWrap.md
+      - DepthPlane: Graffito/DepthPlane.md
+      - FisheyeWarp: Graffito/FisheyeWarp.md
+      - InkMaterial: Graffito/InkMaterial.md
+      - Projection: Graffito/Projection.md
+      - SourceBounds: Graffito/SourceBounds.md
+      - WorldPlane: Graffito/WorldPlane.md
+      - Math:
+        - Graffito/Math/index.md
+        - AffinePlane: Graffito/Math/AffinePlane.md
+        - FacingMaterial: Graffito/Math/FacingMaterial.md
+        - FolioFacetMetrics: Graffito/Math/FolioFacetMetrics.md
+        - FolioWeights: Graffito/Math/FolioWeights.md
+        - Homography: Graffito/Math/Homography.md
+        - PlanePose: Graffito/Math/PlanePose.md
+        - UprightBasis: Graffito/Math/UprightBasis.md
+        - Vec2: Graffito/Math/Vec2.md
+        - Vec3: Graffito/Math/Vec3.md
+      - Projection:
+        - Segment: Graffito/Projection/Segment.md
+      - ShaderContract:
+        - Graffito/ShaderContract/index.md
+        - Constants: Graffito/ShaderContract/Constants.md
+        - ClipPosition: Graffito/ShaderContract/ClipPosition.md
+        - SegmentData: Graffito/ShaderContract/SegmentData.md
+        - VertexColor: Graffito/ShaderContract/VertexColor.md
+
+    - HudCompat:
+      - HudCompat/index.md
+
+    - Occlusion:
+      - Occlusion/index.md
+      - Constants:
+        - Occlusion/Constants/index.md
+
+    - ParticleTextures:
+      - ParticleTextures/index.md
+      - BlendMode: ParticleTextures/BlendMode.md
+      - StyleVisibilityTuning: ParticleTextures/StyleVisibilityTuning.md
+
+    - ProjectManifest:
+      - ProjectManifest/index.md
+
+    - RE (extensions):
+      - RE/index.md
+
+    - RenderConstants:
+      - RenderConstants/index.md
+
+    - Renderer:
+      - Renderer/index.md
+      - NameFit:
+        - Renderer/NameFit/index.md
+        - Result: Renderer/NameFit/Result.md
+
+    - SceneMeter:
+      - SceneMeter/index.md
+
+    - Settings:
+      - Settings/index.md
+      - AnimColorSettings: Settings/AnimColorSettings.md
+      - ClampFloat: Settings/ClampFloat.md
+      - ClampInt: Settings/ClampInt.md
+      - CompatSettings: Settings/CompatSettings.md
+      - DeckSettings: Settings/DeckSettings.md
+      - DisplaySettings: Settings/DisplaySettings.md
+      - DistanceSettings: Settings/DistanceSettings.md
+      - FontSettings: Settings/FontSettings.md
+      - GlowSettings: Settings/GlowSettings.md
+      - HonorificDefinition: Settings/HonorificDefinition.md
+      - MinFloat: Settings/MinFloat.md
+      - MinInt: Settings/MinInt.md
+      - NoClamping: Settings/NoClamping.md
+      - OcclusionSettings: Settings/OcclusionSettings.md
+      - OrnamentSettings: Settings/OrnamentSettings.md
+      - ParticleSettings: Settings/ParticleSettings.md
+      - ParticleStyleToken: Settings/ParticleStyleToken.md
+      - RegisterDefinition: Settings/RegisterDefinition.md
+      - RegisterSettings: Settings/RegisterSettings.md
+      - ShadowOutlineSettings: Settings/ShadowOutlineSettings.md
+      - ShineSettings: Settings/ShineSettings.md
+      - SpecialTitleDefinition: Settings/SpecialTitleDefinition.md
+      - TransitionSettings: Settings/TransitionSettings.md
+      - TypewriterSettings: Settings/TypewriterSettings.md
+      - VisualSettings: Settings/VisualSettings.md
+      - overloaded: Settings/overloaded.md
+      - Context:
+        - Settings/Context/index.md
+      - Validation:
+        - Settings/Validation/index.md
+
+    - Stl:
+      - Stl/index.md
+      - EnumStringMap: Stl/EnumStringMap.md
+      - EnumStringMap:
+        - Entry: Stl/EnumStringMap/Entry.md
+
+    - TextEffects:
+      - TextEffects/index.md
+      - DualOutlineParams: TextEffects/DualOutlineParams.md
+      - OutlineGlowParams: TextEffects/OutlineGlowParams.md
+      - ParticleAuraParams: TextEffects/ParticleAuraParams.md
+      - ShineParams: TextEffects/ShineParams.md
+      - TextVertexSetup: TextEffects/TextVertexSetup.md
+      - WaveParams: TextEffects/WaveParams.md
+
+    - TextPostProcess:
+      - TextPostProcess/index.md
+
+    - Utf8Utils:
+      - Utf8Utils/index.md
