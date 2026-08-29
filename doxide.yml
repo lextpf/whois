@@ -41,6 +41,12 @@ groups:
       - name: DebugOverlay
         title: DebugOverlay
         description: Debug overlay for performance monitoring.
+      - name: TextPostProcess
+        title: TextPostProcess
+        description: GPU post-process passes for glow and divide compositing.
+      - name: BadgeTextures
+        title: BadgeTextures
+        description: Status badge and tier emblem textures rasterized from SVGs.
 
   - name: Configuration
     title: ":material-cog: Configuration"
