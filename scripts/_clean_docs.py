@@ -8,13 +8,13 @@ Cleans doxide-generated markdown for MkDocs Material compatibility:
 - Trims function summary tables to first-sentence briefs
 - Flattens namespace definition lists into single-line bullets
 - Injects class listings under groups on home page
-- Injects version from src/Version.h into home page subtitle
+- Injects version from src/Version.hpp into home page subtitle
 
 Only touches files with 'generator: doxide' frontmatter.
 
 Usage:
-    python scripts/clean_docs.py          # defaults to docs/
-    python scripts/clean_docs.py path/    # custom docs directory
+    python scripts/_clean_docs.py          # defaults to docs/
+    python scripts/_clean_docs.py path/    # custom docs directory
 """
 
 import re
