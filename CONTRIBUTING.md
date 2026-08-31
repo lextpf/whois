@@ -21,7 +21,7 @@ Formatting is enforced by `.clang-format`. Contributors should run the formatter
 |-----------------|----------------------------------|
 |        Language | C++23 (`CMAKE_CXX_STANDARD 23`)  |
 |        Compiler | MSVC 2022 (primary)              |
-|    Build system | CMake 3.10+                      |
+|    Build system | CMake 3.21+ (presets schema v3)  |
 | Package manager | vcpkg                            |
 |         Testing | Google Test with CTest discovery |
 
@@ -348,7 +348,7 @@ An assertion should mean: if this fails, the code is wrong.
 
 ## Comments & Documentation
 
-Documentation comments are written for a **Doxygen-style documentation generator** (e.g. Doxygen or Doxide) that parses `@`-command Javadoc comments. The house style is deliberately **split between headers and sources**; follow it consistently, because a de-sync is easy to introduce. `clang-format` does **not** reflow comment text, so keep every comment body within the project's column limit yourself.
+Documentation comments are written for a **Doxygen-style documentation generator** (e.g. Doxygen or Doxide) that parses `@`-command Javadoc comments. The house style is deliberately **split between headers and sources**; follow it consistently, because a de-sync is easy to introduce. `clang-format` runs with `ReflowComments: Always`, so it *does* rewrap comment prose to the 100-column limit. Do not hand-wrap prose to fight it. It applies the same rewrap inside `@verbatim` blocks and fenced code blocks: a diagram line longer than 100 columns is wrapped *and* its runs of spaces are collapsed, which destroys the art silently. Keep every comment line, diagrams included, at or under 100 columns counting the leading `` * ``.
 
 ### The header/source split (the core rule)
 
@@ -405,7 +405,7 @@ void Resize(std::size_t newSize, bool zeroFill);
 
 The block documenting a header's primary type (or namespace) uses a **fixed tag order**:
 
-1. **Kind tag** - `@struct Name`, `@class Name`, or `@enum Name`. Present when the header defines one primary type; **omit** it for namespace / free-function headers, which lead with `@brief`.
+1. **Kind tag** - `@struct Name`, `@class Name`, `@enum Name`, or `@namespace Name`. Name the primary entity the header defines. Every namespace header in `src/` uses `@namespace`; follow that form.
 2. `@brief` - a one-line summary ending in a period.
 3. `@author [NAME] (https://github.com/[USER])` - the same attribution string everywhere. **File / type-level only**; never repeated on a function, method, or member.
 4. `@ingroup <Module>` - one of the modules your project defines (see below).
@@ -425,10 +425,11 @@ The block documenting a header's primary type (or namespace) uses a **fixed tag 
  */
 ```
 
-A namespace / free-function header drops the kind tag and leads with `@brief`:
+A namespace / free-function header leads with `@namespace`:
 
 ```cpp
 /**
+ * @namespace VecMath
  * @brief Pure, dependency-free 2D vector math helpers.
  * @author [NAME] (https://github.com/[USER])
  * @ingroup <Module>
@@ -442,13 +443,15 @@ Do **not** use `@file` - leave file identity implicit.
 
 #### Modules (`@ingroup`)
 
-Every documented entity is grouped under a module with `@ingroup <Module>`. Modules are declared **once** - each as an `@addtogroup <Id> <Title>` block in a single group-definitions header - and every other file only *references* them with `@ingroup`. Never add a new `@addtogroup` outside that one header.
+Most documented entities are grouped under a module with `@ingroup <Module>`, but this is not universal and must not be applied mechanically - see the path warning below. Modules are declared **once** in `doxide.yml`, under the top-level `groups:` key; source files only *reference* them with `@ingroup`. There is no group-definitions header in this repository, and `@addtogroup` is not used anywhere in `src/`. To add a module, add it to the `groups:` tree in `doxide.yml` first, then reference it.
 
 Choose the module by **subsystem role, not filename**: a rendering helper belongs to the rendering module even when its filename names the feature it serves rather than the module.
 
 #### Function / method documentation
 
-A `/** */` block: `@brief` first (it may reference `@p param` / `@ref Symbol`), a blank line, prose, then `@param` (name + description, continuation lines aligned under the description) and `@return`. **No `@author`.** The spelling is `@return`, never `@returns`.
+A `/** */` block: `@brief` first, a blank line, prose, then `@param` (name + description, continuation lines aligned under the description) and `@return`. **No `@author`.** The spelling is `@return`, never `@returns`.
+
+Keep the brief line **plain text**. Do not put `@p`, `@ref` or square brackets in it - see "Command vocabulary" below. Put a parameter reference or a range such as `[0, 1)` in the prose, `@param` or `@return` text instead, where both are safe.
 
 ```cpp
 /**
@@ -498,27 +501,39 @@ bool postProcessEnabled{true};
 
 #### Grouping related members
 
-Group members with a `@name` section fenced by `@{` ... `@}`. The **opener** is either a `/** ... @{ */` block (when it carries `@name`/`@brief`) or two one-line `/// @name` + `/// @{` lines. The **closer** is always a single physical line - `/// @}` (a one-line `/** @} */` is also acceptable). Never expand a closer into a multi-line block, and balance every `@{` with a `@}`.
+Separate related members with a plain `//` section comment. Do **not** use `@name` / `@{` / `@}` member groups: doxide 0.9.0 copies those commands literally into the generated Markdown and attaches the group text to the summary row of the next member, and large headers that use them have crashed `doxide build`, which aborts `build.bat`. The `//` idiom in `Settings.hpp` and `RenderSettingsSnapshot` is the house form.
 
 ```cpp
-/**
- * @name Window state
- * @{
- */
+// Window state
 Window* m_Window = nullptr;  ///< Owned OS window handle.
 int m_Width = 1280;          ///< Client-area width, in pixels.
 int m_Height = 720;          ///< Client-area height, in pixels.
 bool m_Initialized = false;  ///< Whether creation succeeded (for safe teardown).
-/// @}
 ```
 
 #### Command vocabulary
 
 Documentation commands to use where useful:
 
-`@brief`, `@author`, `@ingroup` (plus `@addtogroup` in the group-definitions header only), `@struct` / `@class` / `@enum`, `@param`, `@return`, `@tparam`, `@pre` / `@post`, `@note` / `@warning`, `@p` / `@c` / `@ref` / `@see`, `@par <Title>`, `@name` / `@{` / `@}`, `@code` / `@endcode` (and `@code{.cpp}`), `@verbatim` / `@endverbatim` for ASCII diagrams, and LaTeX math `@f[ ... @f]` / inline `@f$ ... @f$`.
+`@brief`, `@author`, `@ingroup`, `@struct` / `@class` / `@enum` / `@namespace`, `@param`, `@return`, `@tparam`, `@pre` / `@post`, `@note` / `@warning`, `@p` / `@c` / `@see`, `@code` / `@endcode` (and `@code{.cpp}`), and `@verbatim` / `@endverbatim` for ASCII diagrams.
 
-Do **not** use: `@file`, `@returns`, `@union`, `@short`, `@defgroup`, `@def`, `@fn`, `@var`, `@internal`.
+For math, write a `$$ ... $$` block: the mkdocs pipeline renders it through arithmatex. For diagrams, use a fenced `mermaid` code block, or `@verbatim` for ASCII art.
+
+**The brief line is a special case.** `@p` and square brackets are safe in prose, `@param` and `@return` text, but not in the brief - that is the `@brief` line, or the first prose line when the block omits `@brief`. doxide 0.9.0 has mis-parsed such a brief on large real headers: it stops emitting the type pages for that file and exits non-zero, so `build.bat` fails at the documentation step. A minimal single-header repro does **not** reproduce it, so treat this as a rule, not as something you can confirm quickly in isolation. Note also that the `unrecognized command: brief` line is **not** the symptom: doxide 0.9.0 emits that line, and `unrecognized command: author`, once per run for any use of `@brief` or `@author` at all. `scripts/_clean_docs.py` strips both tags before mkdocs runs, so the log line is expected noise on every clean build.
+
+Do **not** use: `@file`, `@returns`, `@union`, `@short`, `@defgroup`, `@addtogroup`, `@def`, `@fn`, `@var`, `@internal`, `@par`, `@ref`, `@name` / `@{` / `@}`, and the LaTeX forms `@f[ ... @f]` / `@f$ ... @f$`. doxide 0.9.0 does not understand `@par`, `@ref`, `@name` / `@{` / `@}`, or the LaTeX forms: it copies them into the published Markdown as literal text, and `@ref` links the wrong word.
+
+**`@p` and `@c` take the whole next whitespace-delimited token, punctuation included.** `@p roll.` publishes as `` `roll.` `` - the period ends up inside the code span, and `@p size)` swallows the closing parenthesis. Backtick-quote the identifier yourself whenever the reference is followed immediately by `.`, `,`, `;`, `:` or `)`: write ``the caller owns `roll`.`` rather than `@p roll.`. Use `@p` only when a space follows the name.
+
+**`@ingroup` decides the generated page path, so never add, remove or change one without rebuilding the docs and updating `mkdocs.yml`.** The `nav:` tree is hand-maintained against the paths doxide emits, and a mismatch is reported only as an mkdocs *warning* - `mkdocs build` and `build.bat` still exit 0, so the broken nav entry ships silently. Verified against doxide 0.9.0:
+
+| Entity | Without `@ingroup` | With `@ingroup Mod` |
+|---|---|---|
+| top-level namespace `Foo` | `docs/Foo/` | `docs/Foo/` (unchanged) |
+| nested namespace `Foo::Bar` | `docs/Foo/Bar/` | `docs/Bar/` |
+| type `T` inside namespace `Foo` | `docs/Foo/T.md` | `docs/Mod/.../T.md` |
+
+Two consequences. **Never put `@ingroup` on a nested namespace block** - it detaches the page from its parent and orphans every nav entry beneath it. And a type that the nav reaches through its namespace path must stay ungrouped; the `Settings` structs are the example. doxide logs `namespace cannot have @ingroup, ignoring` for every namespace block, which makes the tag look inert - it is not.
 
 ---
 
