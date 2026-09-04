@@ -82,7 +82,9 @@
       "targets": [
         "glyph_test_utils",
         "glyph_test_settings",
-        "glyph_test_label_format"
+        "glyph_test_label_format",
+        "glyph_test_graffito",
+        "glyph_test_deck"
       ]
     },
     {
@@ -102,7 +104,9 @@
       "targets": [
         "glyph_test_utils",
         "glyph_test_settings",
-        "glyph_test_label_format"
+        "glyph_test_label_format",
+        "glyph_test_graffito",
+        "glyph_test_deck"
       ],
       "nativeToolOptions": [
         "/m"
